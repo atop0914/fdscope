@@ -1,0 +1,4 @@
+# Binaries produced by `go build` in the repo root.
+/fdscope
+/bin/
+*.test
