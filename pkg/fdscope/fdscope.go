@@ -69,6 +69,7 @@ const (
 	KindAnonInode = model.KindAnonInode
 	KindDevice    = model.KindDevice
 	KindDir       = model.KindDir
+	KindDeleted   = model.KindDeleted
 	KindUnknown   = model.KindUnknown
 )
 

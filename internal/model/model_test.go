@@ -1,6 +1,9 @@
 package model
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestFingerprintNormalisation(t *testing.T) {
 	n := DefaultNormalizer()
@@ -44,7 +47,7 @@ func TestFingerprintNormalisation(t *testing.T) {
 		{"numeric basename kept", "/tmp/12345", "file:/tmp/12345", KindFile},
 
 		// Deleted files are their own fingerprint: the action item differs.
-		{"deleted file", "/tmp/scratch (deleted)", "deleted:/tmp/scratch", KindFile},
+		{"deleted file", "/tmp/scratch (deleted)", "deleted:/tmp/scratch", KindDeleted},
 
 		// Home anonymisation stops usernames leaking into shared reports.
 		{"home anonymised", "/home/alice/.cache/x", "file:~/.cache/x", KindFile},
@@ -106,6 +109,36 @@ func TestFingerprintSeparatesDifferentResources(t *testing.T) {
 		if a == b {
 			t.Errorf("distinct resources collapsed to one fingerprint: %q and %q both -> %q",
 				pair[0], pair[1], a)
+		}
+	}
+}
+
+// TestFingerprintPrefixAgreesWithKind locks in an invariant that a live run
+// caught: the fingerprint prefix and the kind are rendered side by side, so a
+// deleted file classified as KindFile produced a self-contradicting row
+// ("file  deleted:/tmp/x"). Any caller filtering by kind to find disk-leak
+// candidates would also silently miss them.
+func TestFingerprintPrefixAgreesWithKind(t *testing.T) {
+	n := DefaultNormalizer()
+	n.HomeDir = "/home/alice"
+
+	cases := map[string]FDKind{
+		"/tmp/x (deleted)":            KindDeleted,
+		"/tmp/x":                      KindFile,
+		"socket:[1]":                  KindSocket,
+		"pipe:[2]":                    KindPipe,
+		"anon_inode:[eventpoll]":      KindAnonInode,
+		"/dev/null":                   KindDevice,
+		"/var/log/app.log.2026-10-22": KindFile,
+	}
+	for target, want := range cases {
+		fp, kind := n.Fingerprint(target)
+		if kind != want {
+			t.Errorf("Fingerprint(%q): kind = %q, want %q (fp %q)", target, kind, want, fp)
+		}
+		// Cross-check: the prefix and the kind must never disagree.
+		if strings.HasPrefix(fp, "deleted:") != (kind == KindDeleted) {
+			t.Errorf("Fingerprint(%q) = %q classified as %q: prefix and kind disagree", target, fp, kind)
 		}
 	}
 }

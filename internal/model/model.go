@@ -34,6 +34,13 @@ const (
 	KindDevice FDKind = "device"
 	// KindDir is a directory descriptor.
 	KindDir FDKind = "dir"
+	// KindDeleted is a file that has been unlinked while still held open.
+	//
+	// It is a distinct kind rather than a flag on KindFile because the
+	// consequence is different: a leaked live file costs one descriptor, while
+	// a leaked deleted file also pins disk space that `du` cannot see and only
+	// `lsof | grep deleted` reveals.
+	KindDeleted FDKind = "deleted"
 	// KindUnknown is the fallback when the link target cannot be classified.
 	KindUnknown FDKind = "unknown"
 )

@@ -139,6 +139,15 @@ func (n Normalizer) Fingerprint(target string) (fp string, kind FDKind) {
 		// item (disk is not reclaimed) and must not be merged with a live file.
 		prefix = "deleted:"
 	}
+	// A deleted file is its own kind, not just its own fingerprint prefix.
+	//
+	// The two must agree: reports show the fingerprint's prefix and the kind
+	// side by side, so classifying a deleted file as a plain file produces a
+	// row that reads "file  deleted:/tmp/x" and contradicts itself. It also
+	// matters for any caller that filters by kind to find disk-leak candidates.
+	if dead {
+		return prefix + path, KindDeleted
+	}
 	return prefix + path, kind
 }
 
@@ -230,7 +239,7 @@ func fingerprintKind(prefix, payload string) FDKind {
 	case "pipe":
 		return KindPipe
 	case "deleted:":
-		return KindFile
+		return KindDeleted
 	case "file:":
 		// The payload of a file fingerprint may be an anonymised "~/..." form,
 		// which is still a file once expanded.
