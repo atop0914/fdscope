@@ -156,15 +156,15 @@ func TestNormalizerOptionsAreHonoured(t *testing.T) {
 
 func TestTargetKind(t *testing.T) {
 	cases := map[string]FDKind{
-		"":                      KindUnknown,
-		"socket:[1]":            KindSocket,
-		"pipe:[2]":              KindPipe,
-		"anon_inode:[eventfd]":  KindAnonInode,
-		"/dev/null":             KindDevice,
-		"/dev/shm/a":            KindFile,
-		"/var/log/x":            KindFile,
-		"relative/path":         KindUnknown,
-		"/proc/1/fd/3":          KindFile,
+		"":                     KindUnknown,
+		"socket:[1]":           KindSocket,
+		"pipe:[2]":             KindPipe,
+		"anon_inode:[eventfd]": KindAnonInode,
+		"/dev/null":            KindDevice,
+		"/dev/shm/a":           KindFile,
+		"/var/log/x":           KindFile,
+		"relative/path":        KindUnknown,
+		"/proc/1/fd/3":         KindFile,
 	}
 	for target, want := range cases {
 		if got := TargetKind(target); got != want {

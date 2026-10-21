@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        # Matches the go directive in go.mod. fdscope depends on nothing
+        # outside the standard library, so older toolchains are cheap to keep
+        # supported and that support is worth testing rather than assuming.
+        go-version: ['1.25']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go-version }}
+
+      # The library suite. Linux-only tests live behind IsSupported() and are
+      # expected to run here, not silently skip.
+      - run: go test -count=1 -race -timeout 600s ./...
+
+      # Prove no test silently skipped. A skipped leak test is indistinguishable
+      # from a passing one in the summary line, and this project's value is
+      # entirely in its assertions actually running.
+      - name: Verify no tests were skipped
+        run: |
+          go test -count=1 -v ./... 2>&1 | tee /tmp/test.log
+          if grep -q -- '--- SKIP' /tmp/test.log; then
+            echo "::error::tests were skipped; fdscope must not silently pass"
+            grep -- '--- SKIP' /tmp/test.log
+            exit 1
+          fi
+
+      # Zero third-party dependencies is a design promise, not an accident.
+      # This gate fails if anyone adds one.
+      - name: Verify zero third-party dependencies
+        run: |
+          deps=$(go list -deps ./... | grep -v '^github.com/atop0914/fdscope' \
+            | grep -E '^[a-z0-9.-]+\.[a-z]{2,}/' || true)
+          if [ -n "$deps" ]; then
+            echo "::error::non-stdlib dependencies found:"
+            echo "$deps"
+            exit 1
+          fi
+
+      # Cross-compilation gate. The test job runs linux/amd64 only, so
+      # platform-specific files are otherwise invisible until release.
+      - name: Cross-compilation gate
+        run: make build-check
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+      # v7 is required: golangci-lint-action v6 rejects golangci-lint v2.x.
+      - uses: golangci/golangci-lint-action@v7
+        with:
+          version: v2.12.2

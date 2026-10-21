@@ -40,11 +40,11 @@ type Normalizer struct {
 // genuinely different leaks into one row.
 func DefaultNormalizer() Normalizer {
 	return Normalizer{
-		KeepDir:        true,
-		StripDeleted:   true,
-		StripRotation:  true,
-		AnonymiseHome:  true,
-		HomeDir:        "",
+		KeepDir:       true,
+		StripDeleted:  true,
+		StripRotation: true,
+		AnonymiseHome: true,
+		HomeDir:       "",
 	}
 }
 

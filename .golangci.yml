@@ -1,0 +1,76 @@
+version: "2"
+
+run:
+  timeout: 5m
+  tests: true
+
+linters:
+  default: none
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - misspell
+    - unconvert
+    - bodyclose
+    - copyloopvar
+    - errorlint
+    - nilerr
+    - predeclared
+    - revive
+    - whitespace
+
+  settings:
+    errcheck:
+      # Deferred closes on read-only files are checked where it matters; a
+      # blanket exemption would hide real leaks, which is the whole subject of
+      # this project.
+      check-type-assertions: true
+      check-blank: false
+    misspell:
+      # v2 renamed this field from ignore-words; the old name fails config
+      # validation outright.
+      ignore-rules:
+        - cancelled
+    revive:
+      rules:
+        - name: exported
+          disabled: false
+        - name: package-comments
+          disabled: false
+        - name: blank-imports
+        - name: context-as-argument
+        - name: error-return
+        - name: error-strings
+        - name: increment-decrement
+        - name: var-naming
+
+  exclusions:
+    generated: lax
+    rules:
+      # Tests deliberately ignore some errors while constructing fixtures.
+      - path: _test\.go
+        linters:
+          - errcheck
+          - revive
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+
+  settings:
+    goimports:
+      # Three groups: stdlib, third-party, local. fdscope has no third-party
+      # dependencies today, so the middle group stays empty, but the rule keeps
+      # imports correct the day one is (legitimately) added.
+      local-prefixes:
+        - github.com/atop0914/fdscope
+
+issues:
+  # Report everything. Default caps hide issues behind earlier fixes, which
+  # makes progress look stalled when it is not.
+  max-issues-per-linter: 0
+  max-same-issues: 0
