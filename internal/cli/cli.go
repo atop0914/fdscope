@@ -53,6 +53,8 @@ func Run(args []string, stdout, stderr io.Writer) error {
 	switch args[0] {
 	case "snapshot":
 		return runSnapshot(args[1:], stdout, stderr)
+	case "diff":
+		return runDiff(args[1:], stdout, stderr)
 	case "version":
 		_, err := fmt.Fprintln(stdout, "fdscope "+Version)
 		return err
@@ -176,6 +178,16 @@ func writeSnapshotJSON(w io.Writer, snap model.Snapshot, top int) error {
 func writeSnapshotTable(w io.Writer, snap model.Snapshot, top int) error {
 	rep := buildReport(snap, top)
 
+	// Render into a buffer and hand the caller one write. A consumer that stops
+	// reading early must not decide how much of the report gets built.
+	buf := &errBuffer{}
+	if err := renderSnapshotTable(buf, rep, top); err != nil {
+		return err
+	}
+	return buf.flushTo(w)
+}
+
+func renderSnapshotTable(w io.Writer, rep snapshotReport, top int) error {
 	// Every write is checked. A renderer that ignores write errors prints a
 	// truncated report and exits 0 - the caller then diffs a partial table
 	// against a baseline and draws the wrong conclusion. Writing to a closed
