@@ -210,3 +210,57 @@ func (p *Probe) Exists(pid int) bool {
 	_, err := os.Stat(filepath.Join(p.procRoot(), strconv.Itoa(pid)))
 	return err == nil
 }
+
+// StartTime reads the process start time from field 22 of /proc/<pid>/stat.
+//
+// The value is in clock ticks since boot, not wall-clock: it is only ever
+// compared with another reading from the same machine, which is exactly what
+// diffing two snapshots needs. A pid is unique only among live processes, so
+// "same pid" proves nothing on its own - comparing start times is how a
+// restarted process is told apart from a running one.
+//
+// The field is extracted by scanning from the last ')' because field 2 (comm)
+// may contain spaces and parentheses, e.g. "(my app)"; splitting on whitespace
+// from the left is the standard way to get this wrong.
+func (p *Probe) StartTime(pid int) (uint64, error) {
+	if pid <= 0 {
+		return 0, fmt.Errorf("invalid pid %d", pid)
+	}
+	data, err := os.ReadFile(filepath.Join(p.procRoot(), strconv.Itoa(pid), "stat"))
+	if err != nil {
+		switch {
+		case os.IsNotExist(err):
+			return 0, fmt.Errorf("%w: %d", ErrNoSuchProcess, pid)
+		case os.IsPermission(err):
+			return 0, fmt.Errorf("%w: %d", ErrPermission, pid)
+		default:
+			return 0, fmt.Errorf("read stat of %d: %w", pid, err)
+		}
+	}
+	return parseStartTime(string(data))
+}
+
+// parseStartTime extracts field 22 from a raw /proc/<pid>/stat line.
+//
+// Split out so the parsing - the part that is easy to get wrong - is reachable
+// from tests without a live process.
+func parseStartTime(stat string) (uint64, error) {
+	// Find the closing paren of comm. Everything after it is space-separated
+	// with no quoting, starting at field 3 (state).
+	end := strings.LastIndexByte(stat, ')')
+	if end < 0 || end+1 >= len(stat) {
+		return 0, fmt.Errorf("malformed stat line %q", stat)
+	}
+	fields := strings.Fields(stat[end+1:])
+	// fields[0] is field 3, so field 22 is fields[22-3].
+	const startTimeField = 22
+	idx := startTimeField - 3
+	if len(fields) <= idx {
+		return 0, fmt.Errorf("malformed stat line: %d fields after comm, need %d", len(fields), idx+1)
+	}
+	v, err := strconv.ParseUint(fields[idx], 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("parse start time %q: %w", fields[idx], err)
+	}
+	return v, nil
+}
