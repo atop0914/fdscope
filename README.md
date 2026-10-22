@@ -89,11 +89,42 @@ cd fdscope && make build     # -> bin/fdscope
 ## Usage
 
 ```console
-fdscope snapshot <pid>              # grouped table
+fdscope snapshot <pid>              # grouped table: what is open now
 fdscope snapshot <pid> --json       # machine-readable
 fdscope snapshot <pid> --top 10     # largest groups only
 fdscope snapshot <pid> --keep-dir=false   # collapse directories (sharded stores)
+
+fdscope diff <pid>                  # what changed across two samples
+fdscope diff <pid> --interval 5s --count 3
+fdscope diff <pid> --json           # for CI
 ```
+
+`diff` compares **fingerprints, not descriptor numbers**. Numbers are recycled
+the moment a descriptor closes, so a close followed by an open usually lands on
+the same number and the two samples look identical. That swap is exactly what a
+leak hunter needs to see:
+
+```console
+$ fdscope diff 4242 --interval 2s
+pid 4242  183 -> 188 open (+5)  188/1024 open (18.4%), 836 remaining
+sampled 2026-10-22T21:11:23+08:00 .. 2026-10-22T21:11:25+08:00 (2.001s)
+
+DELTA  BEFORE  AFTER  KIND  RESOURCE
++3     2       5      file  file:/var/log/app.log
++2     0       2      file  file:/tmp/scratch.bin
+
+deleted files still open (paths are gone from the filesystem; sizes are not available):
+FDS  WRITABLE  PATH
+1    1         /tmp/upload.part
+```
+
+Two answers it deliberately refuses to give:
+
+- **No size for deleted files.** The path no longer exists, so its size cannot be
+  read. Only the count of descriptors is reported.
+- **No diff across a restart.** A pid is unique only among live processes; if the
+  start time from `/proc/<pid>/stat` changed, the diff is an error rather than a
+  comparison of two unrelated processes.
 
 Exit codes are part of the contract because CI branches on them:
 
