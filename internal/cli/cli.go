@@ -33,12 +33,20 @@ const usage = `fdscope - audit file descriptor usage of a Linux process
 
 Usage:
   fdscope snapshot <pid> [--json] [--top N]
+  fdscope diff <pid> [--interval D] [--count N] [--json]
+  fdscope watch <pid> [--interval D] [--samples N] [--keep N] [--json]
   fdscope version
 
 snapshot:
   Capture the current descriptor set of <pid>, grouped by normalised
   fingerprint. The table shows how many descriptors share each resource, which
   is the first thing to look at when a count is suspiciously high.
+
+watch:
+  Sample <pid> repeatedly and report the shape of each series: rising, falling or
+  flat, plus whether the resource rose to a peak and fell back. "Rising and
+  staying" is what leaks; "rising and coming back" is work being done, and two
+  snapshots cannot tell them apart.
 `
 
 // Run dispatches a subcommand. args excludes the program name.
@@ -55,6 +63,8 @@ func Run(args []string, stdout, stderr io.Writer) error {
 		return runSnapshot(args[1:], stdout, stderr)
 	case "diff":
 		return runDiff(args[1:], stdout, stderr)
+	case "watch":
+		return runWatch(args[1:], stdout, stderr)
 	case "version":
 		_, err := fmt.Fprintln(stdout, "fdscope "+Version)
 		return err

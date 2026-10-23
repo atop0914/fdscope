@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -40,6 +42,10 @@ func buildCLI(t *testing.T) string {
 type child struct {
 	cmd *exec.Cmd
 	dir string
+	// out accumulates everything the child printed. Tests attach it to a
+	// failure so "the fixture did not get there" comes with the child's own
+	// account of where it stopped, instead of requiring a rerun with prints.
+	out *safeBuffer
 }
 
 // startChild runs script with sh and waits for marker to appear on its stdout.
@@ -58,6 +64,11 @@ func startChildWith(t *testing.T, shell, script, marker string) *child {
 	full := "d=" + shellQuote(dir) + "\n" + script
 
 	cmd := exec.Command(shell, "-c", full)
+	// Put the child in its own session so that killing its process group cannot
+	// reach the test runner. Without this, `kill(-pgid)` on a fixture shares the
+	// group with go test and takes the whole run down by SIGKILL - a failure with
+	// no output at all, easily mistaken for the OOM killer.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	outR, outW, err := os.Pipe()
 	if err != nil {
 		t.Fatalf("pipe: %v", err)
@@ -71,7 +82,7 @@ func startChildWith(t *testing.T, shell, script, marker string) *child {
 	// The child owns this end now; keeping a copy would prevent EOF.
 	_ = outW.Close()
 
-	ch := &child{cmd: cmd, dir: dir}
+	ch := &child{cmd: cmd, dir: dir, out: &safeBuffer{}}
 	t.Cleanup(func() {
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
@@ -81,25 +92,32 @@ func startChildWith(t *testing.T, shell, script, marker string) *child {
 	// Read until the marker. Reading in the test goroutine (not a helper
 	// goroutine) means a script that dies before the marker fails the test
 	// immediately instead of hanging.
+	//
+	// Draining continues for the child's whole life, not just until the marker.
+	// A one-shot drain of a few kilobytes is not enough: the pipe holds 64 KiB,
+	// and a child that prints one line per step - which is exactly what a staged
+	// fixture does - fills it and then blocks forever in write(2). The symptom is
+	// a child frozen at an arbitrary step, which reads as "the fixture is slow"
+	// rather than "the test stopped reading".
 	done := make(chan string, 1)
 	go func() {
 		var sb strings.Builder
 		buf := make([]byte, 512)
+		signalled := false
 		for {
 			n, err := outR.Read(buf)
 			if n > 0 {
 				sb.Write(buf[:n])
-				if strings.Contains(sb.String(), marker) {
+				ch.out.Write(buf[:n])
+				if !signalled && strings.Contains(sb.String(), marker) {
+					signalled = true
 					done <- sb.String()
-					// Keep draining so the child never blocks on a full pipe.
-					go func() {
-						_, _ = outR.Read(make([]byte, 4096))
-					}()
-					return
 				}
 			}
 			if err != nil {
-				done <- sb.String()
+				if !signalled {
+					done <- sb.String()
+				}
 				return
 			}
 		}
@@ -490,4 +508,22 @@ func waitForFile(t *testing.T, path string) {
 		time.Sleep(2 * time.Millisecond)
 	}
 	t.Fatalf("%s never appeared", path)
+}
+
+// safeBuffer collects a child's output for diagnostics.
+type safeBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *safeBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *safeBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }

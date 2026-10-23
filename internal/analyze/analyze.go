@@ -268,6 +268,11 @@ type Report struct {
 	// the whole observation. It is a separate field from Dropped so a reader
 	// cannot miss it.
 	Incomplete bool `json:"incomplete"`
+	// Requested is how many samples the caller asked for. The analyser does not
+	// sample, so it is set by the caller; it exists because "samples: 4" alone is
+	// ambiguous - four out of four is a finished run, four out of forty is an
+	// interrupted one, and a reader cannot tell them apart without this number.
+	Requested int `json:"requested_samples,omitempty"`
 	// Span is the wall-clock distance between the first and last retained
 	// sample, in milliseconds. Milliseconds rather than a Duration string so
 	// the JSON stays parseable without a second parser.
