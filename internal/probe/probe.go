@@ -27,6 +27,19 @@ var ErrNotLinux = errors.New("fdscope only supports Linux: /proc/<pid>/fd is req
 // ErrNoSuchProcess is returned when the target pid has no /proc entry.
 var ErrNoSuchProcess = errors.New("process not found")
 
+// ErrProcessExited is returned when the pid still has a /proc entry but the entry
+// belongs to a zombie.
+//
+// This distinction is not pedantry, it is the difference between a correct report
+// and a fabricated one. A zombie keeps its /proc directory - so the pid still
+// "exists" - but its fd directory is empty, because the kernel has already
+// released its file table. Reading that as a snapshot produces a perfectly valid
+// looking sample in which every descriptor was released at once. Applied to a leak
+// audit that is the worst possible answer: the leaked resource is reported as
+// freed at the exact moment the process died, and the tool's central claim
+// silently inverts.
+var ErrProcessExited = errors.New("process exited: pid now belongs to a zombie")
+
 // ErrPermission is returned when /proc entries exist but cannot be read, which
 // happens for processes owned by another user without CAP_SYS_PTRACE.
 var ErrPermission = errors.New("permission denied reading process descriptors")
@@ -86,6 +99,20 @@ func (p *Probe) Snapshot(pid int) (model.Snapshot, error) {
 		default:
 			return model.Snapshot{}, fmt.Errorf("read %s: %w", dir, err)
 		}
+	}
+
+	// A process that has exited but not been reaped keeps its /proc directory and
+	// answers readdir on /fd with an empty list instead of an error. An empty
+	// descriptor set is a legitimate state for a live process, so it cannot be
+	// rejected on its own - the process state has to be consulted.
+	//
+	// Getting this wrong is not a small inaccuracy. A leak audit that sampled a
+	// zombie would report every descriptor as released at the moment the process
+	// died, which inverts the tool's conclusion at the worst possible time. The
+	// live case (a process that genuinely holds nothing open) is unaffected
+	// because its state is S/R/D, never Z.
+	if exited, stateErr := p.exited(pid); stateErr == nil && exited {
+		return model.Snapshot{}, fmt.Errorf("%w: %d", ErrProcessExited, pid)
 	}
 
 	snap := model.Snapshot{
@@ -209,6 +236,45 @@ func (p *Probe) OpenLimit(pid int) int {
 func (p *Probe) Exists(pid int) bool {
 	_, err := os.Stat(filepath.Join(p.procRoot(), strconv.Itoa(pid)))
 	return err == nil
+}
+
+// exited reports whether the pid's /proc entry belongs to a zombie.
+//
+// It is deliberately separate from Exists: a zombie satisfies Exists, so any
+// caller that uses Exists as a liveness check will treat a dead process as alive.
+// The state is field 3 of /proc/<pid>/stat, which sits after the comm field and
+// therefore has to be located from the last ')' - comm may contain both spaces and
+// parentheses.
+func (p *Probe) exited(pid int) (bool, error) {
+	data, err := os.ReadFile(filepath.Join(p.procRoot(), strconv.Itoa(pid), "stat"))
+	if err != nil {
+		return false, err
+	}
+	return parseZombie(string(data))
+}
+
+// parseZombie reports whether a raw /proc/<pid>/stat line describes a zombie.
+//
+// Split out so the parsing is reachable from tests without a dying process.
+func parseZombie(stat string) (bool, error) {
+	state, err := parseState(stat)
+	if err != nil {
+		return false, err
+	}
+	return state == "Z", nil
+}
+
+// parseState extracts field 3 (the process state letter) from a stat line.
+func parseState(stat string) (string, error) {
+	end := strings.LastIndexByte(stat, ')')
+	if end < 0 || end+1 >= len(stat) {
+		return "", fmt.Errorf("malformed stat line %q", stat)
+	}
+	fields := strings.Fields(stat[end+1:])
+	if len(fields) == 0 {
+		return "", fmt.Errorf("malformed stat line: no fields after comm")
+	}
+	return fields[0], nil
 }
 
 // StartTime reads the process start time from field 22 of /proc/<pid>/stat.
