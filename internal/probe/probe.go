@@ -88,23 +88,14 @@ func (p *Probe) Snapshot(pid int) (model.Snapshot, error) {
 		return model.Snapshot{}, fmt.Errorf("invalid pid %d", pid)
 	}
 
-	dir := p.fdDir(pid)
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		switch {
-		case os.IsNotExist(err):
-			return model.Snapshot{}, fmt.Errorf("%w: %d", ErrNoSuchProcess, pid)
-		case os.IsPermission(err):
-			return model.Snapshot{}, fmt.Errorf("%w: %d", ErrPermission, pid)
-		default:
-			return model.Snapshot{}, fmt.Errorf("read %s: %w", dir, err)
-		}
-	}
-
-	// A process that has exited but not been reaped keeps its /proc directory and
-	// answers readdir on /fd with an empty list instead of an error. An empty
-	// descriptor set is a legitimate state for a live process, so it cannot be
-	// rejected on its own - the process state has to be consulted.
+	// A process that has exited but not been reaped must be rejected before
+	// anything is read from its fd directory. A zombie keeps its /proc directory
+	// and its fd directory still exists, but the kernel has already dropped its
+	// file table, so readdir can answer either an empty list (what this check
+	// originally guarded against) or a flat EACCES, depending on whether the
+	// entry is readable by the caller at all. Handing the EACCES to the caller
+	// as ErrPermission names the wrong cause: "you may not look at this live
+	// process" instead of "this process is gone, there is nothing to look at".
 	//
 	// Getting this wrong is not a small inaccuracy. A leak audit that sampled a
 	// zombie would report every descriptor as released at the moment the process
@@ -113,6 +104,28 @@ func (p *Probe) Snapshot(pid int) (model.Snapshot, error) {
 	// because its state is S/R/D, never Z.
 	if exited, stateErr := p.exited(pid); stateErr == nil && exited {
 		return model.Snapshot{}, fmt.Errorf("%w: %d", ErrProcessExited, pid)
+	}
+
+	dir := p.fdDir(pid)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		switch {
+		case os.IsNotExist(err):
+			return model.Snapshot{}, fmt.Errorf("%w: %d", ErrNoSuchProcess, pid)
+		case os.IsPermission(err):
+			// Re-read the state: the process may have been reaped between the
+			// check above and this read, in which case EACCES is still the wrong
+			// diagnosis and "not found" (or "exited") is the right one.
+			if exited, stateErr := p.exited(pid); stateErr == nil && exited {
+				return model.Snapshot{}, fmt.Errorf("%w: %d", ErrProcessExited, pid)
+			}
+			if !p.Exists(pid) {
+				return model.Snapshot{}, fmt.Errorf("%w: %d", ErrNoSuchProcess, pid)
+			}
+			return model.Snapshot{}, fmt.Errorf("%w: %d", ErrPermission, pid)
+		default:
+			return model.Snapshot{}, fmt.Errorf("read %s: %w", dir, err)
+		}
 	}
 
 	snap := model.Snapshot{
