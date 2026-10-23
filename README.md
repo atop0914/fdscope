@@ -97,7 +97,52 @@ fdscope snapshot <pid> --keep-dir=false   # collapse directories (sharded stores
 fdscope diff <pid>                  # what changed across two samples
 fdscope diff <pid> --interval 5s --count 3
 fdscope diff <pid> --json           # for CI
+
+fdscope watch <pid>                 # the shape of each series over time
+fdscope watch <pid> --interval 500ms --samples 60
+fdscope watch <pid> --samples 200 --keep 60   # bounded retention
+fdscope watch <pid> --json          # for CI
 ```
+
+`watch` answers the question neither of the others can: **is it rising and
+staying, or rising and coming back?** A batch job and a leak produce the same two
+numbers when sampled at the peak and at the end; only the shape between them
+tells them apart.
+
+```console
+$ fdscope watch 4242 --interval 500ms --samples 12
+pid 4242  12 samples over 5.511s  total rising 4 -> 8
+total descriptors: 4 -> 8 (min 4, max 8)
+
+TREND  FIRST  LAST  MIN  MAX  REBOUND     KIND     RESOURCE
+flat   2      2     2    2    -           pipe     pipe
+flat   0      1     0    1    -           file     file:~/.cache/app/wal-1.log
+flat   0      1     0    1    -           file     file:~/.cache/app/wal-2.log
+
+no resource rose and then fell back within the window
+```
+
+The same run against a batch job ends differently:
+
+```console
+total: first=3 last=3 min=3 max=13 peak_at=3 trend=flat rebound=True (13->3)
+
+10 resource(s) rose and then fell back (self-healing, not a leak):
+PEAK  LOW  DROP  RESOURCE
+13    3    10    (total)
+```
+
+Three things it deliberately refuses to do:
+
+- **It does not conclude "leak".** A rising series can still be a warm-up or a
+  slow batch. `watch` reports the shape and the numbers; the judgement needs a
+  baseline and a persistence rule, which is a later step.
+- **It does not sample a zombie.** A dead-but-unreaped process keeps its `/proc`
+  entry with an *empty* fd directory. Reading that as a sample would report every
+  descriptor as released at the moment the process died - the exact inverse of a
+  leak. It is an error instead.
+- **It never discards collected samples.** If the process dies at sample 40 of
+  60, the 40 already taken are printed and then the exit code is non-zero.
 
 `diff` compares **fingerprints, not descriptor numbers**. Numbers are recycled
 the moment a descriptor closes, so a close followed by an open usually lands on
