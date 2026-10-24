@@ -184,3 +184,69 @@ func SampleFromSnapshot(s model.Snapshot) timeline.Sample {
 	}
 	return sample
 }
+
+// SampleTimeline samples pid count times into a fresh timeline, skipping
+// incomplete snapshots exactly as Watch does.
+//
+// It is Watch without the verdict-facing extras: no snapshot bookkeeping, no
+// start-time reuse rules beyond the ones the timeline itself enforces, and the
+// error is returned directly. It exists for callers that judge the timeline
+// themselves - the analyzer's tests sample a real leaking process through this,
+// so that the path they exercise is the production path and not a second counting
+// rule that could drift from it.
+//
+// Unlike Watch, a read error is returned alongside the timeline rather than
+// swallowed into the result: there is no report to salvage here, and a caller
+// judging the samples must know that the series ends early.
+func (p *Probe) SampleTimeline(pid, count int, interval time.Duration) (*timeline.Timeline, error) {
+	if !IsSupported() {
+		return nil, ErrNotLinux
+	}
+	if pid <= 0 {
+		return nil, fmt.Errorf("invalid pid %d", pid)
+	}
+	if count < 1 {
+		return nil, fmt.Errorf("sample count must be at least 1, got %d", count)
+	}
+	if interval < 0 {
+		return nil, fmt.Errorf("interval must not be negative, got %s", interval)
+	}
+
+	tl, err := timeline.New(pid, count)
+	if err != nil {
+		return nil, err
+	}
+	start, err := p.StartTime(pid)
+	if err != nil {
+		return nil, err
+	}
+	if err := tl.SetStartTime(start); err != nil {
+		return nil, err
+	}
+
+	for i := 0; i < count; i++ {
+		if i > 0 && interval > 0 {
+			time.Sleep(interval)
+		}
+		snap, snapErr := p.Snapshot(pid)
+		if snapErr != nil {
+			return tl, snapErr
+		}
+		// A pid recycled mid-run would splice two unrelated descriptor sets
+		// into one series, which is indistinguishable from a leak.
+		instStart, startErr := p.StartTime(pid)
+		if startErr != nil {
+			return tl, startErr
+		}
+		if setErr := tl.SetStartTime(instStart); setErr != nil {
+			return tl, setErr
+		}
+		if !snap.Complete() {
+			continue
+		}
+		if addErr := tl.Add(SampleFromSnapshot(snap)); addErr != nil {
+			return tl, addErr
+		}
+	}
+	return tl, nil
+}

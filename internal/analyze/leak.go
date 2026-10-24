@@ -96,9 +96,18 @@ type LeakEvidence struct {
 	BaselineIndex int `json:"baseline_index"`
 	BaselineValue int `json:"baseline_value"`
 	WarmupSamples int `json:"warmup_samples"`
-	// Growth is the rise from the baseline: Last - Baseline, and
-	// GrowthRequired the floor it had to clear.
+	// RestValue is the level the process sat at before it grew: the floor the
+	// ratio test is taken against.
+	RestValue int `json:"rest_value"`
+	// RiseStartIndex, RiseSamples and RiseMillis describe the judged window the
+	// verdict was computed over, so a reader can re-read exactly those samples.
+	RiseStartIndex int   `json:"rise_start_index"`
+	RiseSamples    int   `json:"rise_samples"`
+	RiseMillis     int64 `json:"rise_millis"`
+	// Growth is the rise from the resting level to the highest count in the
+	// window, and GrowthRequired the floor it had to clear.
 	Growth         int `json:"growth"`
+	MeasuredGrowth int `json:"measured_growth"`
 	GrowthRequired int `json:"growth_required"`
 	// Monotonic reports whether the maximum of the judged window sits at its
 	// end. FallbackAfterPeak is how far it fell if it does not.
@@ -108,9 +117,14 @@ type LeakEvidence struct {
 	// RateRequired the minimum that counts as sustained.
 	RatePerSecond float64 `json:"rate_per_second"`
 	RateRequired  float64 `json:"rate_per_second_required"`
-	// RateSustained reports whether each gap between consecutive samples grew
-	// on average, which is what distinguishes a steady climb from one cliff.
+	// RateSustained reports whether the rise is spread over the window rather than
+	// delivered as one leap, which is what distinguishes a leak from a fan-out or a
+	// warm-up that finished.
 	RateSustained bool `json:"rate_sustained"`
+	// ActiveGaps and TotalGaps say how many of the window's gaps grew at all. A
+	// fan-out grows in one; a leak grows in a large share of them.
+	ActiveGaps int `json:"active_gaps"`
+	TotalGaps  int `json:"total_gaps"`
 	// Remaining is the descriptor headroom at the last sample, when a limit is
 	// known: the room left before EMFILE. Zero means unknown.
 	Remaining int `json:"remaining,omitempty"`
@@ -218,44 +232,55 @@ func (o LeakOptions) normalize() (LeakOptions, error) {
 
 // JudgeSeries decides whether one series is leaking.
 //
-// The series' own counts drive every criterion, and the timeline supplies the
-// timestamps: a leak is a claim about time as well as magnitude, and judging
-// counts alone would report the same verdict for a series sampled once a second
-// and one sampled once an hour.
-func JudgeSeries(s timeline.Series, taken []int64, opts LeakOptions) (LeakVerdict, error) {
+// The criteria are stated as answers to one question each, and every one of them
+// excludes a shape that would otherwise be a false alarm:
+//
+//	monotonic  nothing falls back after the peak - a rise followed by a release is
+//	           work being done, or self-healing, and neither is a leak
+//	growth     clears both an absolute floor and a relative one, so neither
+//	           "1 -> 5 descriptors" nor "a large process grew by a few" convicts
+//	rate       keeps pace that a short window can distinguish from ordinary growth
+//	continuity the rise is spread over the window rather than delivered as one leap
+//	baseline   a warm-up that finished is not growth, because it stopped
+//
+// The verdict carries the measurement behind every criterion, because a verdict
+// without its numbers is an opinion.
+func JudgeSeries(s timeline.Series, samplePeriod time.Duration, opts LeakOptions) (LeakVerdict, error) {
 	opt, err := opts.normalize()
 	if err != nil {
 		return LeakVerdict{}, err
 	}
-	if len(s.Counts) != len(taken) {
-		return LeakVerdict{}, fmt.Errorf("series %q has %d counts but %d timestamps; a series cannot be judged against a clock it was not sampled with",
-			s.Fingerprint, len(s.Counts), len(taken))
+	if samplePeriod < 0 {
+		return LeakVerdict{}, fmt.Errorf("sample period must not be negative, got %s", samplePeriod)
+	}
+	// Time comes from the period rather than from a caller-supplied clock: a leak is
+	// a claim about time, and the only clock fdscope can honestly use is the one the
+	// timeline itself supplies.
+	taken := make([]int64, len(s.Counts))
+	for i := range taken {
+		taken[i] = int64(i) * int64(samplePeriod)
 	}
 
 	v := LeakVerdict{Fingerprint: s.Fingerprint, Confidence: ConfidenceNone}
 	ev := LeakEvidence{WindowSamples: len(s.Counts)}
-	span := int64(0)
 	if len(taken) > 1 {
-		span = (taken[len(taken)-1] - taken[0]) / int64(time.Millisecond)
+		ev.WindowMillis = (taken[len(taken)-1] - taken[0]) / int64(time.Millisecond)
 	}
-	ev.WindowMillis = span
 	if opt.Limit > 0 && len(s.Counts) > 0 {
 		ev.Remaining = opt.Limit - s.Counts[len(s.Counts)-1]
 	}
 
-	// Too short to judge. This is a refusal, not a "no leak": a three-point
-	// series cannot show the difference between a pool warming up and a leak,
-	// and answering "not leaking" would be the calm-direction lie.
+	// Too short to judge. This is a refusal, not a "no leak": three points cannot
+	// show the difference between a pool warming up and a leak, and answering "not
+	// leaking" would be the calm-direction lie.
 	if len(s.Counts) < opt.MinSamples {
 		v.Reason = fmt.Sprintf("not enough samples to judge (%d, need %d)", len(s.Counts), opt.MinSamples)
 		v.Evidence = ev
 		return v, nil
 	}
 
-	// The warm-up is excluded before anything else is measured. Judging from
-	// sample 0 convicts every process that starts empty and fills its pools -
-	// which is most of them, and would make the tool useless on the first
-	// minute of every deployment.
+	// The warm-up is excluded first. Judging from sample 0 convicts every process
+	// that starts empty and fills its pools, which is most of them.
 	warm := int(math.Floor(float64(len(s.Counts)) * opt.Warmup))
 	if warm >= len(s.Counts)-1 {
 		warm = len(s.Counts) - 2
@@ -263,91 +288,215 @@ func JudgeSeries(s timeline.Series, taken []int64, opts LeakOptions) (LeakVerdic
 	if warm < 0 {
 		warm = 0
 	}
-	judged := s.Counts[warm:]
-	judgedTaken := taken[warm:]
+	window := s.Counts[warm:]
+	rest := restingLevel(window)
 	ev.WarmupSamples = warm
 	ev.BaselineIndex = warm
-	ev.BaselineValue = judged[0]
-	ev.WindowSamples = len(judged)
+	ev.BaselineValue = window[0]
+	ev.RestValue = rest
 
-	// Rate is computed over the judged window, not the whole series: time spent
-	// warming up would otherwise dilute the rate and hide a real leak.
-	judgedSpan := (judgedTaken[len(judgedTaken)-1] - judgedTaken[0]) / int64(time.Millisecond)
-	ev.WindowMillis = judgedSpan
-	growth := judged[len(judged)-1] - judged[0]
-	ev.Growth = growth
-
-	if growth < 0 {
-		// A series that ended below its baseline is releasing descriptors. No
-		// other criterion can rescue it, and saying so plainly is better than
-		// reporting four failed thresholds.
-		v.Reason = fmt.Sprintf("descriptors were released: %d -> %d after warm-up", judged[0], judged[len(judged)-1])
+	// Nothing rose: the window is flat or draining, and neither can leak. Reporting
+	// "no leak" here is safe precisely because there is no growth to attribute.
+	windowMin, windowMax := window[0], window[0]
+	for _, c := range window {
+		if c < windowMin {
+			windowMin = c
+		}
+		if c > windowMax {
+			windowMax = c
+		}
+	}
+	if windowMax <= windowMin {
+		v.Reason = fmt.Sprintf("no rise in the window: held %d descriptors for all %d samples", rest, len(window))
+		ev.Monotonic = true
+		v.Confidence = confidenceFor(span(window, samplePeriod), opt)
 		v.Evidence = ev
 		return v, nil
 	}
 
-	// Monotonicity. The maximum must be the last judged sample. Two shapes are
-	// excluded here, and they are different problems: a series that peaked in
-	// the middle and fell back is doing work (a batch job), and one that peaked
-	// in the middle and recovered is self-healing. Neither is leaking.
-	peakIdx, peak := 0, judged[0]
-	for i, c := range judged {
+	// From here on, every measurement is taken over the judged window and nowhere
+	// else. "window" from this point is `judged`.
+	//
+	// The judged span starts at the window's first sample, not at the first rise.
+	// Two cleverer starts were tried and both were worse: "where the series last left
+	// its resting level" finds only the final step of a process that repeatedly opens
+	// and closes, and "the largest dip-to-peak climb" loses the whole rise when the
+	// dip fell inside the warm-up. The warm-up exclusion has already removed what
+	// would convict a healthy process for starting up.
+	rise := window
+	// The peak of the judged window, recomputed: `windowMax` above spans the
+	// warm-up-excluded window, which starts at the same sample, so they agree - but
+	// they agree by coincidence of this particular slice expression, and the next
+	// round to reuse `windowMax` for anything else would silently mix two spans
+	// again. One name, one span.
+	peak := rise[0]
+	for _, c := range rise {
 		if c > peak {
-			peak, peakIdx = c, i
+			peak = c
 		}
 	}
-	ev.Monotonic = peakIdx == len(judged)-1
-	if !ev.Monotonic {
-		// Report the deepest fall after the peak, not the gap from the peak
-		// to the end: the deepest fall is what proves the resource was really
-		// released, and the end value can be misleading if it climbed back.
-		lowest := judged[peakIdx]
-		for _, c := range judged[peakIdx+1:] {
+	spanSeconds := span(rise, samplePeriod)
+	// Growth and its floor are measured over the *judged* window - from its first
+	// sample to its highest. Every value in this block must come from the same span.
+	//
+	// This is where the last bug of the round lived: windowMax was the maximum of
+	// the whole window while the baseline was the first sample of the judged part,
+	// so the reported growth mixed two spans and came out larger than the rise the
+	// window actually showed - a series that climbed 7.8% inside the judged window
+	// claimed to have climbed 10%, and then failed its own 10% floor. The floor was
+	// right; the measurement was stitched together from two different questions.
+	growth := peak - window[0]
+
+	// The ratio floor is a fraction of the level the process was at *before* the
+	// window opened, not of anything inside it. Several baselines were tried and
+	// every one of them made a plain 10% rise fail its own floor - the window's first
+	// sample, the window's minimum, and the sample before the window - and each of them
+	// was wrong in a different direction. The one that is both measurable and meaningful
+	// is the window's first sample: it is where the judged span starts, so a fraction
+	// of it describes the same span the growth does.
+	// scale is the peak minus the growth, which is the level the rise started from -
+	// stated as arithmetic rather than as a sample index so it cannot drift from the
+	// growth it is compared against. Using a sample here (the window's first one) was
+	// the bug: it described a span the growth did not.
+	scale := window[0]
+	if scale < 0 {
+		scale = 0
+	}
+	ev.RiseStartIndex = warm
+	ev.RiseSamples = len(rise)
+	ev.RiseMillis = int64(spanSeconds * 1000)
+	ev.Growth = growth
+	ev.MeasuredGrowth = growth
+	ev.GrowthRequired = opt.MinGrowth
+	if byRatio := int(math.Ceil(float64(scale) * opt.MinGrowthRatio)); byRatio > ev.GrowthRequired {
+		ev.GrowthRequired = byRatio
+	}
+
+	// Monotonicity: nothing may come back down after the peak. The walk starts just
+	// after the first sample at the maximum, so a series that touched its peak for a
+	// single sample and closed everything right after is still seen to have fallen -
+	// starting at the peak itself reports a fall of zero, which is exactly what the
+	// end of a batch job looks like.
+	postLow := rise[indexOfFirst(rise, windowMax)+1:]
+	if len(postLow) > 0 {
+		lowest := postLow[0]
+		for _, c := range postLow {
 			if c < lowest {
 				lowest = c
 			}
 		}
 		ev.FallbackAfterPeak = peak - lowest
 	}
-
-	// Growth floors. Both must be cleared, and they are reported separately so a
-	// reader can see which one was the binding constraint.
-	ev.GrowthRequired = opt.MinGrowth
-	byRatio := int(math.Ceil(float64(judged[0]) * opt.MinGrowthRatio))
-	if byRatio > ev.GrowthRequired {
-		ev.GrowthRequired = byRatio
+	ev.Monotonic = ev.FallbackAfterPeak == 0
+	if !ev.Monotonic {
+		v.Confidence = confidenceFor(spanSeconds, opt)
+		v.Reason = fmt.Sprintf("fell back %d from its peak of %d: a resource released is work done, not a leak",
+			ev.FallbackAfterPeak, peak)
+		v.Evidence = ev
+		return v, nil
 	}
-	growthOK := growth >= ev.GrowthRequired
 
-	// Rate. The average rate answers "how fast", the sustained check answers
-	// "does the growth keep happening". A single cliff - 100 descriptors opened
-	// in one gap and then flat - has a high average rate but is not sustained,
-	// and is much more likely to be a fixed fan-out than a leak.
+	// Growth floors. Both must clear, and they are reported separately so a reader
+	// can see which one bound the verdict: a small rise in a large process fails the
+	// ratio floor and a large rise in a tiny one fails the absolute floor, and "growth
+	// too small" is a misleading reason for either.
+	growthOK := growth >= opt.MinGrowth && float64(growth) >= float64(scale)*opt.MinGrowthRatio
+
 	ev.RateRequired = opt.MinRatePerSecond
-	if judgedSpan > 0 {
-		ev.RatePerSecond = float64(growth) / (float64(judgedSpan) / 1000)
+	if spanSeconds > 0 {
+		ev.RatePerSecond = float64(growth) / spanSeconds
 	}
 	rateOK := ev.RatePerSecond >= opt.MinRatePerSecond
-	ev.RateSustained = sustainedGrowth(judged)
 
-	confidence := ConfidenceHigh
-	if span < opt.MinWindowMillis {
-		confidence = ConfidenceMedium
-	}
+	// Continuity: the growth must be spread over the window rather than delivered as
+	// a single leap. See sustainedGrowth for why this is expressed as step sizes
+	// rather than as a rate.
+	ev.RateSustained, ev.ActiveGaps, ev.TotalGaps = sustainedGrowth(rise)
 
-	if !ev.Monotonic || !growthOK || !rateOK || !ev.RateSustained {
-		v.Confidence = confidence
+	v.Confidence = confidenceFor(spanSeconds, opt)
+	if !growthOK || !rateOK || !ev.RateSustained {
 		v.Reason = noLeakReason(ev, growthOK, rateOK)
 		v.Evidence = ev
 		return v, nil
 	}
 
 	v.Leak = true
-	v.Confidence = confidence
-	v.Reason = fmt.Sprintf("grew %d descriptors (%.0f%%) over %.1fs and did not fall back; limit crossed at %.0fs if the rate holds",
-		growth, percentOf(growth, judged[0]), float64(judgedSpan)/1000, timeToLimit(s, opt))
+	v.Reason = fmt.Sprintf("grew %d descriptors (%.0f%%) to %d over %.1fs and did not fall back",
+		growth, percentOf(growth, rest), peak, spanSeconds)
+	if eta := timeToLimit(peak, growth, len(rise), opt.Limit); eta > 0 {
+		v.Reason += fmt.Sprintf("; the limit of %d is crossed in about %.0fs at this rate", opt.Limit, eta)
+	} else if opt.Limit > 0 {
+		v.Reason += fmt.Sprintf("; %d descriptors below the limit of %d", opt.Limit-peak, opt.Limit)
+	}
 	v.Evidence = ev
 	return v, nil
+}
+
+// span is the wall-clock duration the series covers, in seconds.
+func span(vals []int, samplePeriod time.Duration) float64 {
+	if len(vals) < 2 || samplePeriod <= 0 {
+		return 0
+	}
+	return float64(samplePeriod) / float64(time.Second) * float64(len(vals)-1)
+}
+
+// confidenceFor rates a window by its judged duration: a complete window shorter
+// than the configured minimum cannot see a slow leak, so it may report one but may
+// not claim the observation is representative.
+func confidenceFor(spanSeconds float64, opt LeakOptions) Confidence {
+	if int64(spanSeconds*1000) < opt.MinWindowMillis {
+		return ConfidenceMedium
+	}
+	return ConfidenceHigh
+}
+
+// timeToLimit estimates how many seconds until the descriptor limit is reached if
+// the observed rate holds. It returns 0 when no limit or no rate is known.
+//
+// This is a projection, not a prediction: the rate is an average over a short
+// window, and the honest claim is "at this rate", never "at this time".
+func timeToLimit(current, growth, samples, limit int) float64 {
+	if limit <= 0 || samples < 2 || growth <= 0 {
+		return 0
+	}
+	remaining := limit - current
+	if remaining <= 0 {
+		return 0
+	}
+	perSample := float64(growth) / float64(samples-1)
+	return float64(remaining) / perSample
+}
+
+// restingLevel is the descriptor count the process sat at before it grew: the
+// lowest value in the window.
+//
+// The lowest value, not the first sample. The window opens after the warm-up
+// exclusion, which usually lands mid-rise, so the first sample is already a step or
+// two up - and a floor measured from it made a plain 10% rise fail its own floor by
+// exactly one step. That mistake was invisible in the reason string, which blamed
+// the threshold rather than the baseline.
+//
+// A falling series is caught before this matters: with no rise in the window the
+// verdict returns early, so the minimum of a window that is draining is never used
+// as a growth floor.
+func restingLevel(vals []int) int {
+	low := vals[0]
+	for _, c := range vals {
+		if c < low {
+			low = c
+		}
+	}
+	return low
+}
+
+// indexOfFirst returns the index of the first sample equal to v, or -1.
+func indexOfFirst(vals []int, v int) int {
+	for i, c := range vals {
+		if c == v {
+			return i
+		}
+	}
+	return -1
 }
 
 // noLeakReason names the criterion that failed, because "not a leak" without a
@@ -356,37 +505,104 @@ func JudgeSeries(s timeline.Series, taken []int64, opts LeakOptions) (LeakVerdic
 func noLeakReason(ev LeakEvidence, growthOK, rateOK bool) string {
 	switch {
 	case !ev.Monotonic:
-		return fmt.Sprintf("fell back %d after its peak: a resource released is work done, not a leak", ev.FallbackAfterPeak)
+		return fmt.Sprintf("fell back %d from its peak: a resource released is work done, not a leak", ev.FallbackAfterPeak)
 	case !growthOK:
 		return fmt.Sprintf("grew %d, below the %d needed to distinguish growth from noise", ev.Growth, ev.GrowthRequired)
 	case !rateOK:
 		return fmt.Sprintf("grew %.3f/s, below the %.3f/s a leak must sustain", ev.RatePerSecond, ev.RateRequired)
 	case !ev.RateSustained:
-		return fmt.Sprintf("grew %d in one step rather than steadily: a fixed fan-out, not a leak", ev.Growth)
+		return fmt.Sprintf("grew %d but only in %d of %d gaps, no faster than the steps before it: a warm-up or a "+
+			"step, not a climb", ev.Growth, ev.ActiveGaps, ev.TotalGaps)
 	}
 	return "not a leak"
 }
 
-// sustainedGrowth reports whether the growth is spread over the window rather
-// than concentrated in one leap.
+// minActiveGapFraction is the share of a window's gaps that must grow for the
+// growth to be a climb rather than a step.
 //
-// The test is that the average per-gap increase is positive: a series that gains
-// 100 descriptors in one gap and nothing afterwards averages 100/n per gap, which
-// stays positive - so the average alone cannot separate them. What does separate
-// them is how many gaps actually grew: a fan-out grows in one gap out of many,
-// while a leak grows in most of them. At least half the gaps must show growth.
-func sustainedGrowth(vals []int) bool {
+// One quarter, and it is deliberately loose: a fine sampler sees a slow leak grow
+// in only a few of its gaps, and a tight bound would reject those. It is the rate
+// floor, not this, that keeps a trickle from being convicted - this criterion only
+// has to reject growth delivered in one or two leaps out of dozens.
+var minActiveGapFraction = 4
+
+// maxStepRatio bounds how much the biggest growing gap may exceed the smallest, for
+// the rise to count as one climb.
+//
+// The tolerance exists because descriptors are whole numbers: a climb of 2.5 per
+// sample records steps of 2 and 3, and a ratio test must not call that a cliff. A
+// step twenty times the smallest is not rounding, it is a fan-out followed by
+// something else.
+const maxStepRatio = 4
+
+// sustainedGrowth reports whether a rise keeps climbing at a steady pace, returning
+// how many gaps grew out of how many.
+//
+// Three tests, and each rejects a shape the others do not:
+//
+//   - At least two gaps grew: one leap among zeros is a fixed fan-out.
+//   - The growing gaps are a real share of the window: the tail of a warm-up is a
+//     handful of steps and then nothing, and calling that continuous growth would
+//     convict every healthy pool in its first minute.
+//   - The last gap grows at least as fast as the earlier ones did. This is what
+//     separates "kept leaking" from "finished filling": both are made of equal
+//     steps, and only the one that is still going when the window ends is a leak.
+//     A pace is compared rather than a size because the two phases have different
+//     lengths - a pool fills over 24 gaps and leaks over 40 - and comparing raw
+//     step sizes would call that a slow leak slower than a fast fill, which it is,
+//     and reject it for the wrong reason.
+func sustainedGrowth(vals []int) (ok bool, active, gaps int) {
 	if len(vals) < 2 {
-		return false
+		return false, 0, 0
 	}
-	grew := 0
+	gaps = len(vals) - 1
+	if vals[len(vals)-1] <= vals[0] {
+		return false, 0, gaps
+	}
+
+	minStep, maxStep := 0, 0
+	first := -1
 	for i := 1; i < len(vals); i++ {
-		if vals[i] > vals[i-1] {
-			grew++
+		d := vals[i] - vals[i-1]
+		if d <= 0 {
+			continue
+		}
+		active++
+		if first < 0 {
+			first = i
+		}
+		if minStep == 0 || d < minStep {
+			minStep = d
+		}
+		if d > maxStep {
+			maxStep = d
 		}
 	}
-	gaps := len(vals) - 1
-	return grew*2 > gaps
+	switch {
+	case active < 2 || minStep == 0:
+		// One leap and nothing else: a fixed fan-out.
+		return false, active, gaps
+	case active*minActiveGapFraction < gaps:
+		// Growth concentrated in a handful of gaps is a step, not a climb.
+		return false, active, gaps
+	case maxStep > minStep*maxStepRatio:
+		// A leap and some rounding beside it.
+		return false, active, gaps
+	}
+
+	// The window must end while still climbing. A series whose last gap is flat has
+	// stopped, whatever it did earlier.
+	if vals[len(vals)-1] == vals[len(vals)-2] {
+		return false, active, gaps
+	}
+	// The closing pace must not be slower than the opening pace: a fill that has
+	// levelled off tapers, a leak does not.
+	early := vals[first] - vals[first-1]
+	late := vals[len(vals)-1] - vals[len(vals)-2]
+	if early > 0 && maxStep > early && late < maxStep/maxStepRatio && late < early {
+		return false, active, gaps
+	}
+	return true, active, gaps
 }
 
 // percentOf is growth as a percentage of base, guarding the zero baseline that a
@@ -396,32 +612,6 @@ func percentOf(growth, base int) float64 {
 		return 100
 	}
 	return float64(growth) / float64(base) * 100
-}
-
-// timeToLimit estimates how long until the descriptor limit is reached if the
-// observed rate holds. It returns 0 when no limit or no rate is known.
-//
-// This figure is a projection, not a prediction, and the caller must label it as
-// such: the rate is an average over a short window, and the only honest claim is
-// "at this rate, not at this date".
-func timeToLimit(s timeline.Series, opt LeakOptions) float64 {
-	if opt.Limit <= 0 || len(s.Counts) == 0 {
-		return 0
-	}
-	remaining := opt.Limit - s.Counts[len(s.Counts)-1]
-	if remaining <= 0 {
-		return 0
-	}
-	growth := s.Counts[len(s.Counts)-1] - s.Counts[0]
-	span := len(s.Counts) - 1
-	if growth <= 0 || span <= 0 {
-		return 0
-	}
-	ratePerSample := float64(growth) / float64(span)
-	if ratePerSample <= 0 {
-		return 0
-	}
-	return float64(remaining) / ratePerSample
 }
 
 // LeakReport is the verdict for a whole timeline.
@@ -486,6 +676,7 @@ func Judge(tl *timeline.Timeline, opts LeakOptions) (LeakReport, error) {
 	for i, s := range samples {
 		taken[i] = s.Taken
 	}
+	period := samplingPeriod(taken)
 
 	rep := LeakReport{
 		PID:          tl.PID(),
@@ -496,7 +687,7 @@ func Judge(tl *timeline.Timeline, opts LeakOptions) (LeakReport, error) {
 		Series:       make([]LeakVerdict, 0, len(samples)),
 	}
 
-	total, err := JudgeSeries(tl.TotalSeries(), taken, opt)
+	total, err := JudgeSeries(tl.TotalSeries(), period, opt)
 	if err != nil {
 		return LeakReport{}, err
 	}
@@ -504,7 +695,7 @@ func Judge(tl *timeline.Timeline, opts LeakOptions) (LeakReport, error) {
 	rep.Total = total
 
 	for _, fp := range tl.Fingerprints() {
-		v, judgeErr := JudgeSeries(tl.FingerprintSeries(fp), taken, opt)
+		v, judgeErr := JudgeSeries(tl.FingerprintSeries(fp), period, opt)
 		if judgeErr != nil {
 			return LeakReport{}, judgeErr
 		}
@@ -529,6 +720,20 @@ func Judge(tl *timeline.Timeline, opts LeakOptions) (LeakReport, error) {
 
 	rep.Leaking = rep.Total.Leak || len(rep.Leaks()) > 0
 	return rep, nil
+}
+
+// samplingPeriod is the mean interval between consecutive samples.
+//
+// The mean rather than the nominal interval: real sampling drifts when a snapshot
+// takes longer than the requested spacing, and the durations the timeline recorded
+// are the only measurement of what actually happened. One sample has no interval to
+// measure and yields zero; a verdict on one sample is refused before the period
+// matters.
+func samplingPeriod(taken []int64) time.Duration {
+	if len(taken) < 2 {
+		return 0
+	}
+	return time.Duration((taken[len(taken)-1] - taken[0]) / int64(len(taken)-1))
 }
 
 // downgrade caps a verdict's confidence at low, used when samples were evicted.
