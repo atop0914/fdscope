@@ -35,6 +35,7 @@ Usage:
   fdscope snapshot <pid> [--json] [--top N]
   fdscope diff <pid> [--interval D] [--count N] [--json]
   fdscope watch <pid> [--interval D] [--samples N] [--keep N] [--json]
+                      [--judge] [--series]
   fdscope version
 
 snapshot:
@@ -47,6 +48,9 @@ watch:
   flat, plus whether the resource rose to a peak and fell back. "Rising and
   staying" is what leaks; "rising and coming back" is work being done, and two
   snapshots cannot tell them apart.
+
+  --judge adds the verdict, with the numbers behind it, and exits 2 on a leak.
+  It is opt-in because a rising series is also a pool warming up.
 `
 
 // Run dispatches a subcommand. args excludes the program name.

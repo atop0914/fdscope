@@ -102,6 +102,8 @@ fdscope watch <pid>                 # the shape of each series over time
 fdscope watch <pid> --interval 500ms --samples 60
 fdscope watch <pid> --samples 200 --keep 60   # bounded retention
 fdscope watch <pid> --json          # for CI
+fdscope watch <pid> --judge         # decide whether it is a leak; exit 2 if so
+fdscope watch <pid> --judge --json --series   # + the totals the verdict used
 ```
 
 `watch` answers the question neither of the others can: **is it rising and
@@ -132,11 +134,42 @@ PEAK  LOW  DROP  RESOURCE
 13    3    10    (total)
 ```
 
+### `--judge`: from shape to verdict
+
+`watch` on its own will not say "leak", because a rising series is also a pool
+warming up, a batch job in flight and a directory walk. `--judge` opts into the
+conclusion, and the conclusion has to carry its numbers:
+
+```console
+$ fdscope watch 4242 --judge --samples 30
+verdict: LEAK
+window: 30 samples over 3569ms
+
+process total: LEAK (confidence medium)
+  reason: grew 51 descriptors (283%) to 69 over 3.4s and did not fall back; the limit of 4096 is crossed in about 2211s at this rate
+  WINDOW     30 samples / 3569ms  (warmup excluded: 1)
+  BASELINE   18                   rise measured from here
+  GROWTH     51                   (floor 10, reached 510% of it)
+  RATE       14.799/s             (floor 0.050/s)
+  COVERAGE   17/28 gaps grew      still climbing at window end: true
+  MONOTONIC  true                 peak is at the end of the window
+  HEADROOM   4027 left of 4096    1% of the limit consumed
+```
+
+Five criteria must all hold: monotonicity, an absolute growth floor, a rate
+floor, a warm-up baseline, and coverage of the window. Each excludes a specific
+false positive, and each is printed so a reader can disagree with the tool using
+the tool's own numbers.
+
+Exit codes: `0` no leak, `2` leak, `1` the run itself failed. `2` is what CI
+branches on. `--series` adds the per-sample totals, which is what makes a
+verdict reproducible offline rather than an opinion about a run nobody can
+re-examine.
+
 Three things it deliberately refuses to do:
 
-- **It does not conclude "leak".** A rising series can still be a warm-up or a
-  slow batch. `watch` reports the shape and the numbers; the judgement needs a
-  baseline and a persistence rule, which is a later step.
+- **It does not conclude "leak" unless asked.** A rising series can still be a
+  warm-up or a slow batch, so the verdict is opt-in and never volunteered.
 - **It does not sample a zombie.** A dead-but-unreaped process keeps its `/proc`
   entry with an *empty* fd directory. Reading that as a sample would report every
   descriptor as released at the moment the process died - the exact inverse of a
