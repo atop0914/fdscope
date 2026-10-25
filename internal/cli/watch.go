@@ -35,6 +35,7 @@ func runWatch(args []string, stdout, stderr io.Writer) error {
 	top := fs.Int("top", 0, "limit output to the N largest series (0 = all)")
 	keepDir := fs.Bool("keep-dir", true, "keep directory components in fingerprints")
 	stripRotation := fs.Bool("strip-rotation", true, "merge rotated log files into one fingerprint")
+	judge := fs.Bool("judge", false, "also decide whether the series is a leak, and exit 2 if it is")
 
 	args, positionals := splitFlags(args, fs)
 	if err := fs.Parse(args); err != nil {
@@ -117,13 +118,51 @@ func runWatch(args []string, stdout, stderr io.Writer) error {
 	rep.Requested = *samples
 
 	var renderErr error
-	if *asJSON {
+	switch {
+	case *asJSON && *judge:
+		// Handled below, together with the verdict, so that stdout carries exactly
+		// one JSON document. Writing the shape report here and the verdict after it
+		// produces two top-level values, which is not valid JSON - and that defect
+		// was caught by a test asserting the output parses, not by reading it.
+	case *asJSON:
 		renderErr = writeWatchJSON(stdout, rep, res, *top)
-	} else {
+	default:
 		renderErr = writeWatchTable(stdout, rep, res, *top)
 	}
 	if renderErr != nil {
 		return renderErr
+	}
+
+	// The verdict is computed after the shape report and rendered after it too:
+	// the shape is what the reader needs in order to disagree with the verdict,
+	// and printing the conclusion first would invite acting on it without looking.
+	//
+	// The verdict is only reached when asked for. `watch` deliberately does not
+	// convict on its own - a rising series is also a pool warming up - and a
+	// tool that volunteered a verdict on every run would train its reader to
+	// ignore the word.
+	leaking := false
+	if *judge {
+		lr, judgeErr := analyze.Judge(res.Timeline, analyze.DefaultLeakOptions())
+		if judgeErr != nil {
+			return judgeErr
+		}
+		leaking = lr.Leaking
+		if *asJSON {
+			// One document, not two: a second JSON object on stdout is not valid for
+			// the parsers this flag exists for. The shape report is therefore held
+			// back and the verdict nested inside it.
+			if err := writeJudgedJSON(stdout, rep, res, *top, lr); err != nil {
+				return err
+			}
+		} else {
+			if _, err := fmt.Fprintln(stdout); err != nil {
+				return err
+			}
+			if err := renderJudgeTable(stdout, lr); err != nil {
+				return err
+			}
+		}
 	}
 
 	if res.Err != nil {
@@ -143,6 +182,13 @@ func runWatch(args []string, stdout, stderr io.Writer) error {
 		}
 		return fmt.Errorf("sampling stopped after %d of %d samples: %w (report above covers the %d collected)",
 			res.Snapshots, *samples, res.Err, rep.Samples)
+	}
+	// A leak outranks a clean run but not a failed one: the sampling error above
+	// already returned, because an interrupted window is not a verdict at all.
+	// ExitLeakFound is what a CI job branches on, so it must come from the same
+	// report the reader saw.
+	if leaking {
+		return errLeakFound
 	}
 	return nil
 }
