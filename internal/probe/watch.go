@@ -147,6 +147,7 @@ func (p *Probe) Watch(pid, count int, cfg WatchConfig) (WatchResult, error) {
 		sample := timeline.Sample{
 			Taken:  now().UnixNano(),
 			Total:  snap.Len(),
+			Limit:  snap.OpenLimit,
 			Counts: make(map[string]int, snap.Len()),
 		}
 		for _, d := range snap.Descriptors {
@@ -177,6 +178,7 @@ func SampleFromSnapshot(s model.Snapshot) timeline.Sample {
 	sample := timeline.Sample{
 		Taken:  s.Taken,
 		Total:  s.Len(),
+		Limit:  s.OpenLimit,
 		Counts: make(map[string]int, s.Len()),
 	}
 	for _, d := range s.Descriptors {

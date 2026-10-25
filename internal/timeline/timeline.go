@@ -37,6 +37,11 @@ type Sample struct {
 	Total int
 	// Counts maps fingerprint to the number of descriptors holding it.
 	Counts map[string]int
+	// Limit is the process's descriptor soft limit at this sample, or 0 when it
+	// could not be read. It is recorded per sample rather than once because a
+	// process may raise its own limit while being watched, and a headroom figure
+	// computed against a limit that has since changed would be a lie.
+	Limit int
 }
 
 // Count returns the number of descriptors that held fp in this sample, or 0 when
@@ -133,7 +138,7 @@ func (t *Timeline) Add(s Sample) error {
 	// Copy the map so that a caller mutating its own snapshot cannot retroactively
 	// rewrite history. Without this, a watch loop that reuses one map would turn
 	// every retained sample into the latest one, and the series would look flat.
-	cp := Sample{Taken: s.Taken, Total: s.Total, Counts: make(map[string]int, len(s.Counts))}
+	cp := Sample{Taken: s.Taken, Total: s.Total, Limit: s.Limit, Counts: make(map[string]int, len(s.Counts))}
 	for fp, c := range s.Counts {
 		cp.Counts[fp] = c
 	}
@@ -231,6 +236,19 @@ func (t *Timeline) Fingerprints() []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// Limit returns the most recent non-zero descriptor limit seen in the window, or 0.
+//
+// The most recent, not the first: a process that raised its limit mid-run is now
+// constrained by the new value, and the headroom figure must follow.
+func (t *Timeline) Limit() int {
+	for i := len(t.samples) - 1; i >= 0; i-- {
+		if s := t.samples[t.index(i)]; s.Limit > 0 {
+			return s.Limit
+		}
+	}
+	return 0
 }
 
 // Last returns the newest retained sample.
