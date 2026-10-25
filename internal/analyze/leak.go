@@ -96,6 +96,11 @@ type LeakEvidence struct {
 	BaselineIndex int `json:"baseline_index"`
 	BaselineValue int `json:"baseline_value"`
 	WarmupSamples int `json:"warmup_samples"`
+	// Constant reports that the count never changed across the window. It is not a
+	// verdict: a constant count is a leak that happened before sampling began or a
+	// process that simply needs that many descriptors, and only the process total can
+	// tell them apart - see Judge.
+	Constant bool `json:"constant,omitempty"`
 	// RestValue is the level the process sat at before it grew: the floor the
 	// ratio test is taken against.
 	RestValue int `json:"rest_value"`
@@ -125,8 +130,10 @@ type LeakEvidence struct {
 	// fan-out grows in one; a leak grows in a large share of them.
 	ActiveGaps int `json:"active_gaps"`
 	TotalGaps  int `json:"total_gaps"`
-	// Remaining is the descriptor headroom at the last sample, when a limit is
-	// known: the room left before EMFILE. Zero means unknown.
+	// Limit is the descriptor soft limit the verdict was computed against, and
+	// Remaining the headroom at the last sample: the room left before EMFILE. Both
+	// zero when no limit was known.
+	Limit     int `json:"limit,omitempty"`
 	Remaining int `json:"remaining,omitempty"`
 }
 
@@ -267,6 +274,7 @@ func JudgeSeries(s timeline.Series, samplePeriod time.Duration, opts LeakOptions
 		ev.WindowMillis = (taken[len(taken)-1] - taken[0]) / int64(time.Millisecond)
 	}
 	if opt.Limit > 0 && len(s.Counts) > 0 {
+		ev.Limit = opt.Limit
 		ev.Remaining = opt.Limit - s.Counts[len(s.Counts)-1]
 	}
 
@@ -306,7 +314,21 @@ func JudgeSeries(s timeline.Series, samplePeriod time.Duration, opts LeakOptions
 			windowMax = c
 		}
 	}
-	if windowMax <= windowMin {
+	// The guard is against a window that never rises, not against one that ends
+	// flat. A process whose descriptors were all opened before sampling began holds a
+	// constant count for the whole window - and that is the most common leak shape
+	// there is, because a leak is usually discovered after it has already happened.
+	// Reporting "no rise" for it is the calm-direction lie: the rise exists, it is
+	// just older than the window. Judge reports that as a confirmed leak at low
+	// confidence when the series' own first sample was lower (see Judge), and a
+	// constant window is the one case where it can be confirmed at all.
+	if windowMax <= windowMin && window[0] <= s.Counts[0] {
+		// The count held steady for the whole window. Whether that is a leak or a
+		// process that simply needs this many descriptors cannot be decided from
+		// inside the window, so the verdict is deferred to Judge, which sees the
+		// process total at the series' first sample. The marker is Constant here and
+		// the zero Growth: a constant window is a fact, not a conclusion.
+		ev.Constant = true
 		v.Reason = fmt.Sprintf("no rise in the window: held %d descriptors for all %d samples", rest, len(window))
 		ev.Monotonic = true
 		v.Confidence = confidenceFor(span(window, samplePeriod), opt)
@@ -408,9 +430,9 @@ func JudgeSeries(s timeline.Series, samplePeriod time.Duration, opts LeakOptions
 	}
 	rateOK := ev.RatePerSecond >= opt.MinRatePerSecond
 
-	// Continuity: the growth must be spread over the window rather than delivered as
-	// a single leap. See sustainedGrowth for why this is expressed as step sizes
-	// rather than as a rate.
+	// Continuity: the growth must be spread over the window and still going when the
+	// window ends. See sustainedGrowth for why this is coverage rather than a test of
+	// step sizes - every step-size formulation rejected a real leak shape.
 	ev.RateSustained, ev.ActiveGaps, ev.TotalGaps = sustainedGrowth(rise)
 
 	v.Confidence = confidenceFor(spanSeconds, opt)
@@ -511,46 +533,39 @@ func noLeakReason(ev LeakEvidence, growthOK, rateOK bool) string {
 	case !rateOK:
 		return fmt.Sprintf("grew %.3f/s, below the %.3f/s a leak must sustain", ev.RatePerSecond, ev.RateRequired)
 	case !ev.RateSustained:
-		return fmt.Sprintf("grew %d but only in %d of %d gaps, no faster than the steps before it: a warm-up or a "+
-			"step, not a climb", ev.Growth, ev.ActiveGaps, ev.TotalGaps)
+		return fmt.Sprintf("grew %d but only across %d of %d gaps and had stopped by the end of the window: "+
+			"a warm-up or a single step, not a climb", ev.Growth, ev.ActiveGaps, ev.TotalGaps)
 	}
 	return "not a leak"
 }
 
 // minActiveGapFraction is the share of a window's gaps that must grow for the
-// growth to be a climb rather than a step.
+// growth to be continuous rather than a single event.
 //
-// One quarter, and it is deliberately loose: a fine sampler sees a slow leak grow
-// in only a few of its gaps, and a tight bound would reject those. It is the rate
-// floor, not this, that keeps a trickle from being convicted - this criterion only
-// has to reject growth delivered in one or two leaps out of dozens.
-var minActiveGapFraction = 4
+// One third. A burst that opens everything in one or two gaps has a handful of
+// growing gaps out of dozens; a stepwise leak - a worker pool that opens five
+// descriptors every step - grows in every other gap once the sampling interval
+// halves the step rate. Lower than a third, "two gaps out of twenty" starts to pass
+// and a fixed fan-out is convicted.
+const minActiveGapFraction = 3
 
-// maxStepRatio bounds how much the biggest growing gap may exceed the smallest, for
-// the rise to count as one climb.
+// sustainedGrowth reports whether a rise keeps climbing rather than happening once,
+// returning how many gaps grew out of how many.
 //
-// The tolerance exists because descriptors are whole numbers: a climb of 2.5 per
-// sample records steps of 2 and 3, and a ratio test must not call that a cliff. A
-// step twenty times the smallest is not rounding, it is a fan-out followed by
-// something else.
-const maxStepRatio = 4
-
-// sustainedGrowth reports whether a rise keeps climbing at a steady pace, returning
-// how many gaps grew out of how many.
+// Deliberately not a test of step *sizes*. That was tried three times and each
+// version rejected a shape it had no business rejecting:
 //
-// Three tests, and each rejects a shape the others do not:
+//   - "every gap must grow" rejects any leak sampled finely, because a gap that
+//     rounds down to zero is not growth
+//   - "each gap is at least half the average" fails for the same reason, the average
+//     being diluted across gaps that recorded nothing
+//   - "steps must be of similar size" rejects a stepwise leak whose steps straddle
+//     the sampling interval, which is what a real worker pool looks like: five
+//     descriptors per step, one step every 250ms, sampled every 180ms
 //
-//   - At least two gaps grew: one leap among zeros is a fixed fan-out.
-//   - The growing gaps are a real share of the window: the tail of a warm-up is a
-//     handful of steps and then nothing, and calling that continuous growth would
-//     convict every healthy pool in its first minute.
-//   - The last gap grows at least as fast as the earlier ones did. This is what
-//     separates "kept leaking" from "finished filling": both are made of equal
-//     steps, and only the one that is still going when the window ends is a leak.
-//     A pace is compared rather than a size because the two phases have different
-//     lengths - a pool fills over 24 gaps and leaks over 40 - and comparing raw
-//     step sizes would call that a slow leak slower than a fast fill, which it is,
-//     and reject it for the wrong reason.
+// What survives is coverage plus a still-climbing end: growth spread over a real
+// share of the window, and no plateau at the end. A warm-up that finished fails the
+// second test, a fan-out fails the first, and both kinds of leak pass.
 func sustainedGrowth(vals []int) (ok bool, active, gaps int) {
 	if len(vals) < 2 {
 		return false, 0, 0
@@ -559,47 +574,21 @@ func sustainedGrowth(vals []int) (ok bool, active, gaps int) {
 	if vals[len(vals)-1] <= vals[0] {
 		return false, 0, gaps
 	}
-
-	minStep, maxStep := 0, 0
-	first := -1
 	for i := 1; i < len(vals); i++ {
-		d := vals[i] - vals[i-1]
-		if d <= 0 {
-			continue
-		}
-		active++
-		if first < 0 {
-			first = i
-		}
-		if minStep == 0 || d < minStep {
-			minStep = d
-		}
-		if d > maxStep {
-			maxStep = d
+		if vals[i] > vals[i-1] {
+			active++
 		}
 	}
 	switch {
-	case active < 2 || minStep == 0:
+	case active < 2:
 		// One leap and nothing else: a fixed fan-out.
 		return false, active, gaps
 	case active*minActiveGapFraction < gaps:
 		// Growth concentrated in a handful of gaps is a step, not a climb.
 		return false, active, gaps
-	case maxStep > minStep*maxStepRatio:
-		// A leap and some rounding beside it.
-		return false, active, gaps
-	}
-
-	// The window must end while still climbing. A series whose last gap is flat has
-	// stopped, whatever it did earlier.
-	if vals[len(vals)-1] == vals[len(vals)-2] {
-		return false, active, gaps
-	}
-	// The closing pace must not be slower than the opening pace: a fill that has
-	// levelled off tapers, a leak does not.
-	early := vals[first] - vals[first-1]
-	late := vals[len(vals)-1] - vals[len(vals)-2]
-	if early > 0 && maxStep > early && late < maxStep/maxStepRatio && late < early {
+	case vals[len(vals)-1] == vals[len(vals)-2]:
+		// The window ends on a plateau. A leak is still climbing when you stop
+		// watching it; a fill has finished.
 		return false, active, gaps
 	}
 	return true, active, gaps
@@ -678,6 +667,14 @@ func Judge(tl *timeline.Timeline, opts LeakOptions) (LeakReport, error) {
 	}
 	period := samplingPeriod(taken)
 
+	// The limit comes from the timeline's own observations, not from the caller: a
+	// caller that forgot to pass it would silently lose the whole "constant count
+	// against a nearly full limit" rule, which is the only way a leak discovered after
+	// the fact can be confirmed at all.
+	if opt.Limit == 0 {
+		opt.Limit = tl.Limit()
+	}
+
 	rep := LeakReport{
 		PID:          tl.PID(),
 		Samples:      tl.Len(),
@@ -715,6 +712,61 @@ func Judge(tl *timeline.Timeline, opts LeakOptions) (LeakReport, error) {
 		rep.Total = downgrade(rep.Total)
 		for i := range rep.Series {
 			rep.Series[i] = downgrade(rep.Series[i])
+		}
+	}
+
+	// A window that held a constant, elevated count is the shape of a leak that was
+	// discovered after it happened: every descriptor was opened before sampling began,
+	// so the series shows no growth and the verdict above says "no rise". The rise is
+	// real - the process total sits above the descriptors it needs to run - but the
+	// only evidence is the level, not the trend.
+	//
+	// That makes it a *weak* claim, and it is reported as one: confidence low, and the
+	// reason says explicitly that the growth predates the window. Saying nothing would
+	// be the calm-direction lie this project keeps finding in its own assumptions;
+	// saying it loudly would be the false alarm that kills the tool. Low confidence is
+	// the honest third answer.
+	//
+	// It is only claimed when the series' own first recorded sample was lower than the
+	// level held for the whole window. Other descriptors in the same process rose over
+	// the same period, which is what rules out "this process simply needs this many".
+	//
+	// The comparison is between the process total at the first and last *retained*
+	// samples, and the threshold is the absolute floor alone: the ratio floor is a
+	// fraction of a baseline that, inside a constant window, does not exist. A single
+	// window of a process that is already leaking has no rise in it at all - the
+	// descriptors were all opened before the first sample - and demanding a rise there
+	// would mean never convicting the most common incident shape.
+	if rep.Samples >= 2 && !rep.Total.Leak && rep.Total.Evidence.Constant {
+		first := samples[0].Total
+		last := samples[len(samples)-1].Total
+		//
+		// The evidence that this is a leak rather than a process that needs that many
+		// descriptors is the process's own limit: a process sitting at a large constant
+		// count with most of its limit consumed has leaked. A process at 5% of its limit
+		// has not, and saying so would convict every worker pool with a fixed size.
+		//
+		// This is a weaker inference than watching the rise happen, which is why the
+		// verdict is reported at low confidence and says so.
+		grew := last > first && last-first >= opt.MinGrowth
+		limit := rep.Total.Evidence.Limit
+		nearLimit := limit > 0 && last > 0 && float64(last) >= float64(limit)*0.5
+		if grew || nearLimit {
+			var why string
+			if grew {
+				why = fmt.Sprintf("held %d descriptors for the whole window, %d more than when sampling began", last, last-first)
+			} else {
+				why = fmt.Sprintf("held %d descriptors for the whole window against a limit of %d (%d%% used): "+
+					"a constant count this large is a leak that filled the process before sampling began",
+					last, limit, (last*100)/limit)
+			}
+			rep.Total = LeakVerdict{
+				Fingerprint: "(total)",
+				Leak:        true,
+				Confidence:  ConfidenceLow,
+				Reason:      why,
+				Evidence:    rep.Total.Evidence,
+			}
 		}
 	}
 

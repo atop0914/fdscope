@@ -324,6 +324,43 @@ func TestTinyGrowthIsNotALeak(t *testing.T) {
 	}
 }
 
+// TestGrowthJustBelowFloorIsNotALeak pins the growth floor from the side that the
+// tiny-count case cannot reach.
+//
+// TestTinyGrowthIsNotALeak sits at 1 -> 5, where the ratio is enormous and only the
+// absolute floor can reject it. This one sits at a count large enough that the ratio
+// is satisfied and small enough that the absolute floor is not: 100 -> 108 over a
+// long window is a 8% rise, a slow but steady climb, and it must not be called a
+// leak. Removing the floor entirely leaves this test failing, which the tiny case
+// does not.
+func TestGrowthJustBelowFloorIsNotALeak(t *testing.T) {
+	cs := ramp(100, 8, 120)
+	tl := seriesOf(t, map[string][]int{"socket": cs}, 100*time.Millisecond)
+	opts := DefaultLeakOptions()
+	// Both the rate floor and the continuity test have to be out of the way for this
+	// case to reach the growth floors at all. That is not cheating: the default rate
+	// floor already rejects a 0.7/s climb, and a test that passed for that reason
+	// would keep passing after the growth floor was deleted - which is exactly what
+	// the first version of this test did.
+	opts.MinRatePerSecond = 0.001
+	opts.Warmup = 0.01
+	v := judgeOne(t, tl, "socket", opts)
+	if v.Leak {
+		t.Fatalf("a rise of 8 descriptors was reported as a leak against a floor of %d: %s",
+			v.Evidence.GrowthRequired, v.Reason)
+	}
+	if v.Evidence.Growth >= v.Evidence.GrowthRequired {
+		t.Fatalf("the fixture's growth %d clears the floor %d; it cannot test the floor",
+			v.Evidence.Growth, v.Evidence.GrowthRequired)
+	}
+	// The control: the same shape with a rise above the floor is a leak.
+	cs = ramp(100, 40, 120)
+	tl = seriesOf(t, map[string][]int{"socket": cs}, 100*time.Millisecond)
+	if v := judgeOne(t, tl, "socket", opts); !v.Leak {
+		t.Fatalf("a rise of 40 descriptors was not reported as a leak: %s", v.Reason)
+	}
+}
+
 // TestSlowRiseBelowRateFloor is not a leak: a process that gains a descriptor every
 // few seconds is indistinguishable from churn inside a short window, and the rate
 // floor is what keeps the tool from calling it one.
