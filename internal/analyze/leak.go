@@ -599,6 +599,29 @@ func noLeakReason(ev LeakEvidence, growthOK, rateOK bool) string {
 // and a fixed fan-out is convicted.
 const minActiveGapFraction = 3
 
+// maxPlateauGapFraction is how much of the window's tail may be flat before the rise
+// is read as having stopped, expressed as a fraction of the gaps.
+//
+// A quarter. A leak whose steps are longer than the sampling period has zero-width
+// gaps scattered throughout - observed one had fourteen of them in a row separated by
+// three-descriptor steps - so testing only the final gap is a coin flip on where the
+// sampler happened to stop. A fill that finished, by contrast, is flat for everything
+// after its last step, which over any window worth judging is far more than a
+// quarter of it.
+const maxPlateauGapFraction = 4
+
+// trailingPlateau returns how many of the series' last gaps failed to grow.
+func trailingPlateau(vals []int) int {
+	n := 0
+	for i := len(vals) - 1; i > 0; i-- {
+		if vals[i] > vals[i-1] {
+			break
+		}
+		n++
+	}
+	return n
+}
+
 // sustainedGrowth reports whether a rise keeps climbing rather than happening once,
 // returning how many gaps grew out of how many.
 //
@@ -613,9 +636,16 @@ const minActiveGapFraction = 3
 //     the sampling interval, which is what a real worker pool looks like: five
 //     descriptors per step, one step every 250ms, sampled every 180ms
 //
-// What survives is coverage plus a still-climbing end: growth spread over a real
-// share of the window, and no plateau at the end. A warm-up that finished fails the
-// second test, a fan-out fails the first, and both kinds of leak pass.
+// What survives is coverage plus a tail that has not flattened: growth spread over a
+// real share of the window, and no plateau at the end. A warm-up that finished fails
+// the second test, a fan-out fails the first, and both kinds of leak pass.
+//
+// The tail test looks at a run of gaps rather than at the final one. Testing only the
+// last gap was the fourth version of this mistake: a leak stepping every 200ms
+// sampled every 120ms produces an alternating 3, 0, 3, 0 series, and whether the last
+// gap is a zero is decided by phase rather than by the process. One live run was
+// reported as "had stopped by the end of the window" for a series that climbed 13 ->
+// 64 without ever falling back.
 func sustainedGrowth(vals []int) (ok bool, active, gaps int) {
 	if len(vals) < 2 {
 		return false, 0, 0
@@ -629,6 +659,12 @@ func sustainedGrowth(vals []int) (ok bool, active, gaps int) {
 			active++
 		}
 	}
+	// The plateau allowance is at least one gap, so that a short window cannot be
+	// convicted or cleared by an integer division rounding to zero.
+	allowed := gaps / maxPlateauGapFraction
+	if allowed < 1 {
+		allowed = 1
+	}
 	switch {
 	case active < 2:
 		// One leap and nothing else: a fixed fan-out.
@@ -636,9 +672,9 @@ func sustainedGrowth(vals []int) (ok bool, active, gaps int) {
 	case active*minActiveGapFraction < gaps:
 		// Growth concentrated in a handful of gaps is a step, not a climb.
 		return false, active, gaps
-	case vals[len(vals)-1] == vals[len(vals)-2]:
-		// The window ends on a plateau. A leak is still climbing when you stop
-		// watching it; a fill has finished.
+	case trailingPlateau(vals) > allowed:
+		// The window ends on a plateau long enough to be a finished fill rather than
+		// a gap that happened to fall between two steps.
 		return false, active, gaps
 	}
 	return true, active, gaps

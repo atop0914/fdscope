@@ -698,3 +698,64 @@ func TestStartupFillStillExcluded(t *testing.T) {
 		t.Fatalf("a pool that filled and then held was convicted: %s\nevidence: %+v", v.Reason, v.Evidence)
 	}
 }
+
+// TestLeakWhoseLastGapRoundsToZeroIsStillALeak pins the samplers' phase noise out of
+// the verdict.
+//
+// The continuity test ended with "the last gap must grow", which is a coin flip when
+// the process opens descriptors on a fixed step and the sampler runs on a different
+// period: whether the final gap happens to straddle a step is luck. Observed against
+// a live process, one run produced a series climbing 13 -> 64 with no fallback at
+// all, and the verdict was "no leak: had stopped by the end of the window" purely
+// because the last two samples read 64 and 64.
+//
+// A grade-school reading of the same sequence is unambiguous: it went up every other
+// sample for the whole window and never came down. That is a leak, and the verdict
+// must not depend on which side of a step the sampler stopped.
+func TestLeakWhoseLastGapRoundsToZeroIsStillALeak(t *testing.T) {
+	// Alternating 3, 0, 3, 0, ... - the exact shape a stepwise leak has when the
+	// sampling period is roughly half the step period. Ends on a zero gap.
+	// 31 samples so the parity lands on a zero gap at the end.
+	cs := fill(20, 1)
+	for i := 1; i < 31; i++ {
+		if i%2 == 1 {
+			cs = append(cs, cs[len(cs)-1]+3)
+		} else {
+			cs = append(cs, cs[len(cs)-1])
+		}
+	}
+	if cs[len(cs)-1] != cs[len(cs)-2] {
+		t.Fatalf("fixture does not end on a flat gap: %v", cs)
+	}
+	tl := seriesOf(t, map[string][]int{"file:/tmp/stepwise.log": cs}, 120*time.Millisecond)
+
+	v := judgeOne(t, tl, "file:/tmp/stepwise.log", DefaultLeakOptions())
+	if !v.Leak {
+		t.Fatalf("a series that rose %d -> %d and never fell was not convicted because its "+
+			"final gap happened to round to zero: %s\nevidence: %+v",
+			cs[0], cs[len(cs)-1], v.Reason, v.Evidence)
+	}
+	if !v.Evidence.Monotonic {
+		t.Errorf("monotonic = false for a series that never fell: %+v", v.Evidence)
+	}
+}
+
+// TestFinishedFillIsNotRescuedByTheNewRule is the reverse, and it guards the fix
+// above the way TestStartupFillStillExcluded guards the warm-up fix: loosening the
+// end-of-window test must not start convicting a pool that filled and stopped.
+//
+// The distinction is that a finished fill stopped long enough ago for the tail to be
+// flat, while a stepwise leak's zero gaps are one sample wide and always followed by
+// growth.
+func TestFinishedFillIsNotRescuedByTheNewRule(t *testing.T) {
+	// Fills 10 -> 210 over 20 samples, then holds flat for 20.
+	cs := tail(ramp(10, 200, 20), 20)
+	tl := seriesOf(t, map[string][]int{"socket": cs}, 100*time.Millisecond)
+	v := judgeOne(t, tl, "socket", DefaultLeakOptions())
+	if v.Leak {
+		t.Fatalf("a pool that filled and then held was convicted: %s\nevidence: %+v", v.Reason, v.Evidence)
+	}
+	if v.Evidence.RateSustained {
+		t.Errorf("a finished fill was reported as sustained growth: %+v", v.Evidence)
+	}
+}
