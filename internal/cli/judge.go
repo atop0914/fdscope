@@ -24,11 +24,13 @@ type judgedReport struct {
 }
 
 // writeJudgedJSON writes the shape report and the verdict as a single document.
-func writeJudgedJSON(w io.Writer, rep analyze.Report, res probe.WatchResult, top int, lr analyze.LeakReport) error {
+func writeJudgedJSON(w io.Writer, rep analyze.Report, res probe.WatchResult, top int, lr analyze.LeakReport, series []int) error {
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
+	out := buildWatchReport(rep, res, top)
+	out.Totals = series
 	return enc.Encode(judgedReport{
-		watchReport: buildWatchReport(rep, res, top),
+		watchReport: out,
 		Verdict:     lr,
 		Summary:     judgeSummary(lr),
 	})

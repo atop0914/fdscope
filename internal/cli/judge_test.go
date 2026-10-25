@@ -3,6 +3,7 @@ package cli
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -310,5 +311,95 @@ func TestJudgeExitCodeIsDistinctFromFailure(t *testing.T) {
 	}
 	if got := exitErr.ExitCode(); got == ExitLeakFound {
 		t.Fatalf("a failed run exited %d, the same code as a found leak\n%s", got, out)
+	}
+}
+
+// TestSeriesFlagMakesTheVerdictReproducible pins the flag that exists because of a
+// verdict nobody could explain.
+//
+// A live leak was reported as "total rising 30 -> 99" alongside "no leak: had stopped
+// by the end of the window". Without the per-sample totals the only way to tell
+// which of those two statements was wrong was to re-run the sampler and hope the
+// shape recurred - and it would not have, because the shape was the fixture stopping
+// early, not the sampler misbehaving. The totals turned a two-hour argument into one
+// printed line.
+func TestSeriesFlagMakesTheVerdictReproducible(t *testing.T) {
+	bin := buildCLI(t)
+	ch, dir := stagedChild(t, `
+for n in 1 2 3 4 5 6; do exec {fd}>"$d/held-$n.log"; done
+echo ready
+for step in 1 2 3 4 5 6 7 8; do
+  while [ ! -e "$d/marker-$step" ]; do sleep 0.01; done
+  for n in 1 2 3; do exec {fd}>"$d/grow-$step-$n.log"; done
+  echo done > "$d/ack-$step"
+done
+while :; do sleep 0.05; done
+`)
+
+	type run struct {
+		out string
+		err error
+	}
+	done := make(chan run, 1)
+	go func() {
+		out, err := runWatchCLI(t, bin, ch.pid(), "--judge", "--json", "--series",
+			"--interval", "150ms", "--samples", "20")
+		done <- run{out, err}
+	}()
+	for step := 1; step <= 8; step++ {
+		waitForSample(t, dir, step)
+		time.Sleep(180 * time.Millisecond)
+	}
+	r := <-done
+
+	var rep struct {
+		Totals []int `json:"totals"`
+	}
+	if err := json.Unmarshal([]byte(r.out), &rep); err != nil {
+		t.Fatalf("--series output is not valid JSON: %v\n%s", err, r.out)
+	}
+	if len(rep.Totals) < 2 {
+		t.Fatalf("totals has %d entries, want one per retained sample: %v", len(rep.Totals), rep.Totals)
+	}
+	// The series must agree with the summary printed beside it, or the reproduction
+	// would be of a different run.
+	var shape struct {
+		Total struct {
+			First int `json:"first"`
+			Last  int `json:"last"`
+		} `json:"total"`
+	}
+	if err := json.Unmarshal([]byte(r.out), &shape); err != nil {
+		t.Fatalf("unmarshal summary: %v", err)
+	}
+	if rep.Totals[0] != shape.Total.First || rep.Totals[len(rep.Totals)-1] != shape.Total.Last {
+		t.Errorf("totals run %d -> %d but the summary says %d -> %d: the reproduction would be "+
+			"of a different series", rep.Totals[0], rep.Totals[len(rep.Totals)-1],
+			shape.Total.First, shape.Total.Last)
+	}
+	// And the fixture really grew: a flat totals array would satisfy the agreement
+	// check above while proving nothing.
+	if rep.Totals[len(rep.Totals)-1] <= rep.Totals[0] {
+		t.Errorf("totals never rose (%v): the fixture did not create the growth it tests", rep.Totals)
+	}
+}
+
+// TestSeriesFlagRequiresJSON refuses the combination that cannot mean anything.
+//
+// The table renderer has no place for a per-sample array, and silently ignoring the
+// flag would leave a reader believing they had asked for a reproduction they did not
+// get.
+func TestSeriesFlagRequiresJSON(t *testing.T) {
+	bin := buildCLI(t)
+	ch, _ := stagedChild(t, `
+echo ready
+while :; do sleep 0.05; done
+`)
+	out, err := runWatchCLI(t, bin, ch.pid(), "--series", "--samples", "3", "--interval", "10ms")
+	if err == nil {
+		t.Fatalf("--series without --json was accepted, want a refusal\n%s", out)
+	}
+	if !strings.Contains(fmt.Sprint(err), "exit") && !strings.Contains(out, "requires --json") {
+		t.Logf("output: %s (err %v)", out, err)
 	}
 }

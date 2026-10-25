@@ -36,6 +36,7 @@ func runWatch(args []string, stdout, stderr io.Writer) error {
 	keepDir := fs.Bool("keep-dir", true, "keep directory components in fingerprints")
 	stripRotation := fs.Bool("strip-rotation", true, "merge rotated log files into one fingerprint")
 	judge := fs.Bool("judge", false, "also decide whether the series is a leak, and exit 2 if it is")
+	withSeries := fs.Bool("series", false, "include the per-sample descriptor totals in the JSON output")
 
 	args, positionals := splitFlags(args, fs)
 	if err := fs.Parse(args); err != nil {
@@ -117,6 +118,12 @@ func runWatch(args []string, stdout, stderr io.Writer) error {
 	// finished one in the JSON.
 	rep.Requested = *samples
 
+	// The per-sample totals are opt-in and JSON-only: they are what makes a verdict
+	// reproducible offline, and they are the first thing anyone needs when a verdict
+	// looks wrong. Omitted by default because a long window makes a very large array.
+	if *withSeries && !*asJSON {
+		return errors.New("--series requires --json")
+	}
 	var renderErr error
 	switch {
 	case *asJSON && *judge:
@@ -125,7 +132,7 @@ func runWatch(args []string, stdout, stderr io.Writer) error {
 		// produces two top-level values, which is not valid JSON - and that defect
 		// was caught by a test asserting the output parses, not by reading it.
 	case *asJSON:
-		renderErr = writeWatchJSON(stdout, rep, res, *top)
+		renderErr = writeWatchJSON(stdout, rep, res, *top, seriesOf(res, *withSeries))
 	default:
 		renderErr = writeWatchTable(stdout, rep, res, *top)
 	}
@@ -152,7 +159,7 @@ func runWatch(args []string, stdout, stderr io.Writer) error {
 			// One document, not two: a second JSON object on stdout is not valid for
 			// the parsers this flag exists for. The shape report is therefore held
 			// back and the verdict nested inside it.
-			if err := writeJudgedJSON(stdout, rep, res, *top, lr); err != nil {
+			if err := writeJudgedJSON(stdout, rep, res, *top, lr, seriesOf(res, *withSeries)); err != nil {
 				return err
 			}
 		} else {
@@ -203,6 +210,12 @@ type watchReport struct {
 	Snapshots  int  `json:"snapshots"`
 	Incomplete int  `json:"incomplete_snapshots"`
 	Truncated  bool `json:"truncated,omitempty"`
+	// Totals is the process descriptor total at each retained sample, oldest
+	// first, present only when --series asked for it. A verdict that cannot be
+	// reproduced from the numbers it was computed on is an opinion, and before this
+	// existed a suspicious verdict could only be investigated by re-running the
+	// sampler and hoping the shape recurred.
+	Totals []int `json:"totals,omitempty"`
 }
 
 func buildWatchReport(rep analyze.Report, res probe.WatchResult, top int) watchReport {
@@ -218,10 +231,23 @@ func buildWatchReport(rep analyze.Report, res probe.WatchResult, top int) watchR
 	return out
 }
 
-func writeWatchJSON(w io.Writer, rep analyze.Report, res probe.WatchResult, top int) error {
+func writeWatchJSON(w io.Writer, rep analyze.Report, res probe.WatchResult, top int, series []int) error {
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
-	return enc.Encode(buildWatchReport(rep, res, top))
+	out := buildWatchReport(rep, res, top)
+	out.Totals = series
+	return enc.Encode(out)
+}
+
+// seriesOf returns the per-sample descriptor totals when asked for, or nil.
+//
+// Nil rather than an empty slice: the field is omitempty, and an empty array would
+// say "the run collected no samples" for a run that simply did not ask.
+func seriesOf(res probe.WatchResult, want bool) []int {
+	if !want {
+		return nil
+	}
+	return res.Timeline.TotalSeries().Counts
 }
 
 func writeWatchTable(w io.Writer, rep analyze.Report, res probe.WatchResult, top int) error {
