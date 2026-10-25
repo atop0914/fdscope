@@ -645,3 +645,56 @@ while :; do sleep 0.05; done
 		t.Errorf("only %d of the %d opened files appear in the report", present, steps*5)
 	}
 }
+
+// TestLeakWithAFastStartIsStillALeak pins the warm-up exclusion against the shape it
+// was silently discarding.
+//
+// The exclusion exists so that a pool filling at startup is not convicted. It was
+// implemented as a fixed fraction of the series - the first 20% - which assumes the
+// rise is uniformly spread. A real leak is not uniformly spread: observed against a
+// live process, the count went 30 -> 99 over 3.6s while the first 20% of the window
+// already accounted for 33 of the 69 descriptors. The baseline was therefore taken at
+// 63, after half the growth was over, and the remaining climb looked like "only
+// across 6 of 23 gaps, had stopped by the end of the window" - a no-leak verdict for
+// the most unambiguous leak shape there is.
+//
+// The shape below reproduces those proportions: a steep opening followed by a slower
+// but still continuous climb, with no plateau anywhere.
+func TestLeakWithAFastStartIsStillALeak(t *testing.T) {
+	// 30 -> 63 in the first 6 samples, then 63 -> 99 over the remaining 24: fast
+	// start, slower tail, never flat, still climbing at the final sample.
+	cs := append(ramp(30, 33, 6), ramp(63, 36, 24)...)
+	tl := seriesOf(t, map[string][]int{"file:/var/log/app.log": cs}, 120*time.Millisecond)
+
+	v := judgeOne(t, tl, "file:/var/log/app.log", DefaultLeakOptions())
+	if !v.Leak {
+		t.Fatalf("a process that climbed 30 -> 99 and never came down was not reported: %s\nevidence: %+v",
+			v.Reason, v.Evidence)
+	}
+	// The baseline must be the resting level before the climb, not a level reached
+	// halfway through it. A later baseline is the defect this test exists for.
+	if v.Evidence.BaselineValue > 40 {
+		t.Errorf("baseline = %d, want the level before the climb (<= 40): a later baseline "+
+			"discards the steepest part of the rise", v.Evidence.BaselineValue)
+	}
+	if v.Evidence.Growth < 60 {
+		t.Errorf("growth = %d, want the whole climb from the resting level (>= 60)", v.Evidence.Growth)
+	}
+}
+
+// TestStartupFillStillExcluded is the reverse of the test above, and the reason the
+// warm-up exclusion exists at all: a pool that fills once and then holds must not be
+// convicted, however steep the fill was.
+//
+// Without this pairing the fix above could be satisfied by deleting the exclusion,
+// which would convict every service in its first minute.
+func TestStartupFillStillExcluded(t *testing.T) {
+	// Fills 10 -> 210 over the first 20 samples, then holds flat for 40 more.
+	cs := tail(ramp(10, 200, 20), 40)
+	tl := seriesOf(t, map[string][]int{"socket": cs}, 100*time.Millisecond)
+
+	v := judgeOne(t, tl, "socket", DefaultLeakOptions())
+	if v.Leak {
+		t.Fatalf("a pool that filled and then held was convicted: %s\nevidence: %+v", v.Reason, v.Evidence)
+	}
+}

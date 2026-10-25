@@ -1,4 +1,4 @@
-// Package analyze: the leak verdict.
+// Package analyze provides the leak verdict.
 //
 // This file is the one place in fdscope that says "this is a leak". Everything
 // before it describes a shape - what a series did - and describes it without
@@ -289,9 +289,31 @@ func JudgeSeries(s timeline.Series, samplePeriod time.Duration, opts LeakOptions
 
 	// The warm-up is excluded first. Judging from sample 0 convicts every process
 	// that starts empty and fills its pools, which is most of them.
-	warm := int(math.Floor(float64(len(s.Counts)) * opt.Warmup))
+	//
+	// The exclusion ends where the *stable prefix* ends, not at a fixed fraction of
+	// the series. A fixed fraction assumes the rise is uniformly spread, and a real
+	// leak is not: measured against a live process, half of a 30 -> 99 climb happened
+	// in the first 20% of the window, so a proportional cut took the baseline at 63
+	// and reported the remaining climb as "only across 6 of 23 gaps, had stopped by
+	// the end" - a no-leak verdict for an unambiguous leak.
+	//
+	// Only a *flat* prefix is treated as warm-up. A series that is climbing from its
+	// first sample has no warm-up to exclude, and the rise starts at sample 0. The
+	// pool that fills and then holds is still excluded, by a different criterion: its
+	// rise is concentrated in the prefix and the window ends on a plateau, which
+	// sustainedGrowth rejects (see TestStartupFillStillExcluded).
+	warm := stablePrefix(s.Counts)
 	if warm >= len(s.Counts)-1 {
 		warm = len(s.Counts) - 2
+	}
+	if warm < 0 {
+		warm = 0
+	}
+	// The proportional warm-up is kept as an upper bound. It is not the criterion -
+	// the stable prefix is - but a process that churns without ever settling should
+	// not hand the ratio floor a baseline from the busiest moment of its life.
+	if maxWarm := int(math.Floor(float64(len(s.Counts)) * opt.Warmup)); warm > maxWarm {
+		warm = maxWarm
 	}
 	if warm < 0 {
 		warm = 0
@@ -452,6 +474,34 @@ func JudgeSeries(s timeline.Series, samplePeriod time.Duration, opts LeakOptions
 	}
 	v.Evidence = ev
 	return v, nil
+}
+
+// stablePrefix returns how many leading samples belong to a settled prefix: the
+// samples before the count first moves away from the level it started at.
+//
+// "Moves away" is measured against the flat tolerance the shape report already uses,
+// so the two layers agree about what counts as movement. Jitter of one or two
+// descriptors at the start of a series is not a warm-up ending - it is a process
+// sitting still - and treating it as the end of the warm-up would hand the judgement
+// a baseline from the busiest moment of a process that had not started working yet.
+//
+// The result is 0 when the series climbs from its first sample: there is no flat
+// prefix to exclude, so nothing is excluded. That is the case the proportional
+// warm-up got wrong.
+func stablePrefix(counts []int) int {
+	if len(counts) == 0 {
+		return 0
+	}
+	base := counts[0]
+	for i, c := range counts {
+		if c > base+DefaultFlatTolerance || c < base-DefaultFlatTolerance {
+			// The prefix ends at the last sample that was still at the starting
+			// level, so the sample where the movement first appears is the
+			// baseline - it is where the climb begins.
+			return i
+		}
+	}
+	return len(counts)
 }
 
 // span is the wall-clock duration the series covers, in seconds.
