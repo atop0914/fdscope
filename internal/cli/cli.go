@@ -36,6 +36,9 @@ Usage:
   fdscope diff <pid> [--interval D] [--count N] [--json]
   fdscope watch <pid> [--interval D] [--samples N] [--keep N] [--json]
                       [--judge] [--series]
+  fdscope check <pid> [--interval D] [--samples N] [--json]
+                      [--min-growth N] [--min-growth-ratio F] [--min-rate F]
+                      [--min-window D]
   fdscope version
 
 snapshot:
@@ -51,6 +54,17 @@ watch:
 
   --judge adds the verdict, with the numbers behind it, and exits 2 on a leak.
   It is opt-in because a rising series is also a pool warming up.
+
+check:
+  One window, one verdict, for a CI gate. Exits 0 when judged clean, 2 when judged
+  a leak, and 1 when it could not judge at all - no such process, the process died
+  mid-window, or a window too short to separate a warming pool from a leak. The
+  third code is the command: a gate that answered "no leak" when it measured
+  nothing would pass every job whose target happened to break.
+
+  Defaults to 25 samples 200ms apart (a five second window). --min-growth,
+  --min-growth-ratio, --min-rate and --min-window override the thresholds; the
+  values actually applied are echoed in --json under "thresholds".
 `
 
 // Run dispatches a subcommand. args excludes the program name.
@@ -69,6 +83,8 @@ func Run(args []string, stdout, stderr io.Writer) error {
 		return runDiff(args[1:], stdout, stderr)
 	case "watch":
 		return runWatch(args[1:], stdout, stderr)
+	case "check":
+		return runCheck(args[1:], stdout, stderr)
 	case "version":
 		_, err := fmt.Fprintln(stdout, "fdscope "+Version)
 		return err
