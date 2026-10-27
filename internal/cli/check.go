@@ -184,7 +184,7 @@ func buildCheckReport(res fdscope.CheckResult, leak fdscope.LeakOptions) checkRe
 		},
 		Totals:  res.Totals,
 		Verdict: res.Report,
-		Summary: judgeSummary(res.Report),
+		Summary: fdscope.Summarize(res.Report),
 	}
 }
 

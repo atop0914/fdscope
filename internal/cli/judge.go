@@ -4,11 +4,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"strings"
 	"text/tabwriter"
 
 	"github.com/atop0914/fdscope/internal/analyze"
 	"github.com/atop0914/fdscope/internal/probe"
+	fdscope "github.com/atop0914/fdscope/pkg/fdscope"
 )
 
 // judgedReport is the JSON shape of `watch --judge --json`.
@@ -32,7 +32,7 @@ func writeJudgedJSON(w io.Writer, rep analyze.Report, res probe.WatchResult, top
 	return enc.Encode(judgedReport{
 		watchReport: out,
 		Verdict:     lr,
-		Summary:     judgeSummary(lr),
+		Summary:     fdscope.Summarize(lr),
 	})
 }
 
@@ -190,24 +190,4 @@ func growthRatioPercent(ev analyze.LeakEvidence) float64 {
 		return 0
 	}
 	return float64(ev.Growth) / float64(ev.GrowthRequired) * 100
-}
-
-// judgeSummary is the one-line conclusion, used as the exit-code basis and in the
-// JSON envelope.
-//
-// It is derived from the report rather than recomputed so the sentence and the
-// exit code cannot disagree: a run that prints "LEAK" and exits 0 is worse than
-// either alone.
-func judgeSummary(rep analyze.LeakReport) string {
-	if !rep.Leaking {
-		return "no leak"
-	}
-	parts := make([]string, 0, len(rep.Series))
-	if rep.Total.Leak {
-		parts = append(parts, "process total")
-	}
-	for _, v := range rep.Leaks() {
-		parts = append(parts, v.Fingerprint)
-	}
-	return "leak in " + strings.Join(parts, ", ")
 }

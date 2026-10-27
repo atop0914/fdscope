@@ -10,6 +10,7 @@ package fdscope
 import (
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/atop0914/fdscope/internal/analyze"
@@ -126,6 +127,27 @@ type CheckResult struct {
 
 // Leaking reports whether the check found a leak.
 func (r CheckResult) Leaking() bool { return r.Report.Leaking }
+
+// Summarize renders a report as one line: what leaked, if anything.
+//
+// It is derived from the report rather than set next to it, so the sentence and
+// the exit code a caller derives from the same report cannot disagree - a run that
+// prints LEAK and exits 0 is the one combination that must be impossible. It lives
+// here rather than in the command so that an embedder's log line and the binary's
+// say the same thing.
+func Summarize(r LeakReport) string {
+	if !r.Leaking {
+		return "no leak"
+	}
+	parts := make([]string, 0, len(r.Series)+1)
+	if r.Total.Leak {
+		parts = append(parts, "process total")
+	}
+	for _, v := range r.Leaks() {
+		parts = append(parts, v.Fingerprint)
+	}
+	return "leak in " + strings.Join(parts, ", ")
+}
 
 // CheckPID samples pid and returns the verdict.
 //

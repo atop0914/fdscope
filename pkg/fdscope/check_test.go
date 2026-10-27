@@ -168,3 +168,34 @@ func TestCheckPIDRefusesOnAnUnsupportedPlatform(t *testing.T) {
 		t.Fatalf("error = %v, want ErrNotLinux", err)
 	}
 }
+
+// TestSummarizeNamesWhatLeaked keeps the one-line conclusion tied to the report it
+// summarises. It lives in the library because both the binary's JSON envelope and
+// an embedder's log line use it, and two copies of this sentence would eventually
+// disagree about the same verdict.
+func TestSummarizeNamesWhatLeaked(t *testing.T) {
+	clean := LeakReport{Leaking: false}
+	if got := Summarize(clean); got != "no leak" {
+		t.Fatalf("Summarize(clean) = %q, want %q", got, "no leak")
+	}
+
+	leaky := LeakReport{
+		Leaking: true,
+		Total:   LeakVerdict{Fingerprint: "(total)", Leak: true},
+		Series:  []LeakVerdict{{Fingerprint: "file:/var/log/app.log", Leak: true}},
+	}
+	if got, want := Summarize(leaky), "leak in process total, file:/var/log/app.log"; got != want {
+		t.Fatalf("Summarize(leaky) = %q, want %q", got, want)
+	}
+
+	// A leak in one resource but not in the total must name only the resource:
+	// claiming "process total" there would point the reader at the wrong series.
+	partial := LeakReport{
+		Leaking: true,
+		Total:   LeakVerdict{Fingerprint: "(total)", Leak: false},
+		Series:  []LeakVerdict{{Fingerprint: "socket", Leak: true}},
+	}
+	if got, want := Summarize(partial), "leak in socket"; got != want {
+		t.Fatalf("Summarize(partial) = %q, want %q", got, want)
+	}
+}
