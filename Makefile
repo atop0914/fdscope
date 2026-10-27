@@ -46,6 +46,13 @@ build:
 # The cross-compilation gate. CI only runs linux/amd64, so platform-specific
 # code is invisible until a release tags a multi-platform build. This target is
 # the cheapest way to find out early: it compiles, and produces nothing.
+#
+# It ends with a darwin vet because compiling is not enough for platform-specific
+# *test* files: `go build` skips them, so a darwin-only test that stopped
+# compiling would stay invisible until someone ran the suite on a Mac - and the
+# non-Linux refusal is exactly that kind of test. Windows is left out of the vet on
+# purpose: its syscall package has no Setsid, and every fixture here starts its
+# child in its own session.
 .PHONY: build-check
 build-check:
 	@set -e; for platform in $(PLATFORMS); do \
@@ -53,6 +60,12 @@ build-check:
 		echo "  $$goos/$$goarch"; \
 		GOOS=$$goos GOARCH=$$goarch CGO_ENABLED=0 go build -trimpath -o /dev/null $(CMD); \
 	done
+	@$(MAKE) --no-print-directory vet-cross
+
+.PHONY: vet-cross
+vet-cross: ## type-check another platform, test files included
+	@echo "  darwin/arm64 (vet, tests included)"
+	@GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go vet ./...
 
 .PHONY: lint
 lint:
