@@ -104,6 +104,10 @@ fdscope watch <pid> --samples 200 --keep 60   # bounded retention
 fdscope watch <pid> --json          # for CI
 fdscope watch <pid> --judge         # decide whether it is a leak; exit 2 if so
 fdscope watch <pid> --judge --json --series   # + the totals the verdict used
+
+fdscope check <pid>                 # one window, one verdict: the CI gate
+fdscope check <pid> --json          # + the series and the thresholds applied
+fdscope check <pid> --min-growth 50 --min-rate 1   # for a large process
 ```
 
 `watch` answers the question neither of the others can: **is it rising and
@@ -209,10 +213,59 @@ Exit codes are part of the contract because CI branches on them:
 | Code | Meaning |
 |------|---------|
 | 0 | success |
-| 1 | usage or runtime error |
-| 2 | an audit found a leak |
+| 1 | usage or runtime error — including "could not judge" |
+| 2 | an audit found a leak (`check`, `watch --judge`) |
+
+### `check`: one window, one verdict, for a gate
+
+`watch --judge` reaches the same verdict, but it is the wrong shape for CI: the
+caller has to parse a table, and it will happily render a conclusion from a window
+that was cut short. `check` is the same judgement behind a contract.
+
+```console
+$ fdscope check 4242
+pid 4242  check  interval 100ms
+thresholds: rise >= 5 and >= 10% of baseline, rate >= 0.050/s, high confidence from 5000ms
+totals: 7 9 11 13 15 17 19 21
+
+verdict: LEAK
+window: 8 samples over 704ms
+
+process total: LEAK (confidence medium)
+  reason: grew 12 descriptors (133%) to 21 over 0.6s and did not fall back
+  ...
+
+1 resource(s) judged a leak:
+file:/tmp/app/queue: LEAK (confidence medium)
+  ...
+```
+
+| Code | When |
+|------|------|
+| 0 | judged, no leak |
+| 2 | judged, a leak |
+| 1 | **not judged at all**: no such process, the process died mid-window, or a window too short to separate a warming pool from a leak |
+
+The third code is the point of the command. A gate that answered "no leak" when it
+measured nothing would pass every job whose target happened to break — and it would
+do so silently, in the calm direction, which is the direction nobody checks.
+
+Defaults are 25 samples 200ms apart, a five second window; `--min-growth`,
+`--min-growth-ratio`, `--min-rate` and `--min-window` override the thresholds for
+processes too large or too small for the defaults. `--json` echoes the thresholds
+*as applied* and always includes the per-sample totals, so a CI job keeps a
+document whose verdict can be re-derived rather than taken on faith.
+
+```yaml
+- name: descriptor leak gate
+  run: |
+    ./fdscope check "$PID" --json > fdcheck.json
+    # exit 2 fails the job (a leak), and so must exit 1 (nothing was measured)
+```
 
 ## As a library
+
+Reading a snapshot:
 
 ```go
 import "github.com/atop0914/fdscope/pkg/fdscope"
@@ -225,6 +278,52 @@ for _, row := range snap.SortedFingerprints() {
     fmt.Println(row.Count, row.Fingerprint)
 }
 ```
+
+Asking whether a running process is leaking, without a command line:
+
+```go
+res, err := fdscope.CheckPID(pid, fdscope.DefaultCheckOptions()) // 25 samples × 200ms
+if err != nil {
+    // could not measure - this is *not* "no leak". A missing pid, a process
+    // that died mid-window and a window too short to judge all land here.
+    return err
+}
+if res.Leaking() {
+    log.Printf("%s", fdscope.Summarize(res.Report))
+}
+for _, v := range res.Report.Leaks() {
+    log.Printf("%s: %s", v.Fingerprint, v.Reason)
+}
+```
+
+Asserting that a piece of test code released what it opened — goleak's shape:
+
+```go
+func TestQueueDrain(t *testing.T) {
+    fdscope.LeakCheck(t, func() {
+        q := openQueue(t)
+        drain(q)
+        q.Close()
+    })
+}
+```
+
+Two different questions, on purpose. `CheckPID` watches growth over a window and
+answers "is this process leaking" — a claim about time, resting on the shape of a
+series. `LeakCheck` compares the descriptor table before and after the call and
+answers "did this code leave anything behind" — the operation has finished, so
+there is nothing in flight to confuse a leak with, and no window is needed. The
+"two points are not enough" rule that rules out diff-based *leak* judgement does
+not apply once the work is over.
+
+`LeakCheck` options: `WithSettle` (how long to keep sampling for lazily released
+descriptors, default 50ms), `WithTolerance` (how much per-resource growth to
+ignore, default 0), `WithIgnoredFingerprints` (name the harness's own descriptors
+instead of loosening the check for everything).
+
+On a platform without `/proc`, `LeakCheck` **reports a failure** and `CheckPID`
+returns `ErrNotLinux`: a green test would otherwise claim nothing leaked when in
+fact nothing was looked at.
 
 See [`examples/snapshot`](examples/snapshot/main.go).
 
@@ -258,6 +357,7 @@ trusted:
 
 ## Status
 
-Early. `snapshot` works today; time-series leak detection and attribution are
-in progress. See the roadmap for the exact boundary — this file does not claim
-features that do not exist.
+Day 5 of 12. `snapshot`, `diff`, `watch`, `watch --judge` and `check` are working,
+and the verdict is reachable as a library (`CheckPID`, `LeakCheck`). Attribution
+(L1/L2/L3) and the EMFILE projection are not built yet. See the roadmap for the
+exact boundary — this file does not claim features that do not exist.
