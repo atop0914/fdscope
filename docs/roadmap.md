@@ -10,7 +10,8 @@
 | `/proc` 快照采集 | `internal/probe` | 目录项 + `readlink` + `fdinfo` + `limits` |
 | fd 指纹归一化 | `internal/model/fingerprint.go` | socket/pipe 去 inode、日志轮转合并、deleted 单列 |
 | 按指纹分组的报告 | `internal/model/model.go` | 降序排列，稳定输出 |
-| 上限与余量 | `internal/model` `Headroom` | soft limit；未知时显式标 0 |
+| 上限与余量 | `internal/model/limit.go` `Headroom` | 三态（已知/unlimited/读不到）显式区分；JSON 只加字段不改名 |
+| EMFILE 预测 | `internal/analyze/projection.go` | 实测速率 + 剩余量；无速率则不产出 ETA，ETA 带依据与置信度 |
 | CLI `snapshot` | `internal/cli` | 表格 + `--json` + `--top` |
 | 公共库 `pkg/fdscope` | `pkg/fdscope` | 快照 API；`CheckPID` 判定；`LeakCheck` goleak 式断言 |
 | CLI `check` | `internal/cli/check.go` | 一次窗口一次结论，退出码 0/2/1（1 = 没能判定） |
@@ -25,7 +26,7 @@
 | Day 3 | `watch`：时序采样 + 时间序列存储 + 回落检测 | done |
 | Day 4 | 泄漏判定：单调性 + 基线 + 速率 + 覆盖度，**含防误报语料**，`watch --judge` | done |
 | Day 5 | `check` 子命令 + 库级断言 API（`CheckPID` / `LeakCheck`） | done |
-| Day 6 | 上限余量与 `EMFILE` 预测 | todo |
+| Day 6 | 上限余量与 `EMFILE` 预测 | done |
 | Day 7 | L1 归因：指纹 → 类型/路径规则 | todo |
 | Day 8 | L2 归因：泄漏起始时刻 ↔ 进程内事件（标注相关性） | todo |
 | Day 9 | L3 归因：测试期 goroutine 配对 | todo |

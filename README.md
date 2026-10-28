@@ -150,15 +150,23 @@ verdict: LEAK
 window: 30 samples over 3569ms
 
 process total: LEAK (confidence medium)
-  reason: grew 51 descriptors (283%) to 69 over 3.4s and did not fall back; the limit of 4096 is crossed in about 2211s at this rate
+  reason: grew 51 descriptors (283%) to 69 over 3.4s and did not fall back; 4027 descriptors below the limit of 4096: crossed in about 2.5m at 14.8/s
   WINDOW     30 samples / 3569ms  (warmup excluded: 1)
   BASELINE   18                   rise measured from here
   GROWTH     51                   (floor 10, reached 510% of it)
   RATE       14.799/s             (floor 0.050/s)
   COVERAGE   17/28 gaps grew      still climbing at window end: true
   MONOTONIC  true                 peak is at the end of the window
-  HEADROOM   4027 left of 4096    1% of the limit consumed
+  HEADROOM   4027 left of 4096    EMFILE in about 2.5m at 14.8/s
+  PROJECTION rate from 29 samples over 3.4s at 14.799/s  confidence medium
 ```
+
+The headroom line is the answer to "how urgent is this", and it has three shapes
+because the kernel has three answers. A finite limit gets a countdown; `unlimited`
+says EMFILE is unreachable; an unreadable limit says exactly that and claims
+nothing. A countdown is only printed when something is actually rising — a flat
+window has no rate, and a rate invented out of no growth would be a prediction
+dressed as a measurement.
 
 Five criteria must all hold: monotonicity, an absolute growth floor, a rate
 floor, a warm-up baseline, and coverage of the window. Each excludes a specific
@@ -255,6 +263,13 @@ Defaults are 25 samples 200ms apart, a five second window; `--min-growth`,
 processes too large or too small for the defaults. `--json` echoes the thresholds
 *as applied* and always includes the per-sample totals, so a CI job keeps a
 document whose verdict can be re-derived rather than taken on faith.
+
+The same document carries `headroom` (`limit`, `limit_state`, `unlimited`,
+`limit_known`, `limit_hard`) and `projection` (`state`, `rate_per_second`,
+`rate_samples`, `rate_seconds`, `eta_seconds`, `confidence`, `note`). `eta_seconds`
+being absent is meaningful: `state` says whether the limit is `unlimited`, could
+not be read, is already crossed, or simply is not rising. An ETA of `0` never
+means "now".
 
 ```yaml
 - name: descriptor leak gate
