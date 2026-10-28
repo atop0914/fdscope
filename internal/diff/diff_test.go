@@ -14,7 +14,7 @@ import (
 func snap(t *testing.T, taken int64, fds map[int]string, extras ...func(*model.Snapshot)) model.Snapshot {
 	t.Helper()
 	n := model.DefaultNormalizer()
-	s := model.Snapshot{PID: 4242, Taken: taken, OpenLimit: 1024}
+	s := model.Snapshot{PID: 4242, Taken: taken, OpenLimit: model.KnownLimit(1024)}
 	for fd, target := range fds {
 		fp, kind := n.Fingerprint(target)
 		s.Descriptors = append(s.Descriptors, model.Descriptor{

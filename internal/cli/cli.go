@@ -193,7 +193,7 @@ func buildReport(snap model.Snapshot, top int) snapshotReport {
 		Total:      snap.Len(),
 		Unreadable: snap.Unreadable,
 		Complete:   snap.Complete(),
-		Headroom:   model.Headroom{PID: snap.PID, Used: snap.Len(), Limit: snap.OpenLimit},
+		Headroom:   model.NewHeadroom(snap.PID, snap.Len(), snap.OpenLimit),
 		ByKind:     byKind,
 		Groups:     rows,
 	}

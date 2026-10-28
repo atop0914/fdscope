@@ -154,17 +154,43 @@ func renderVerdict(w io.Writer, v analyze.LeakVerdict, total bool) error {
 			return err
 		}
 	}
-	if ev.Limit > 0 {
-		// Headroom is the number that turns "leaking" into "how urgent".
-		if _, err := fmt.Fprintf(tw, "  HEADROOM\t%d left of %d\t", ev.Remaining, ev.Limit); err != nil {
-			return err
-		}
-		if ev.Remaining <= 0 {
-			if _, err := fmt.Fprintln(tw, "at or past the soft limit: EMFILE is imminent"); err != nil {
+	// The headroom and the projection are printed from the projection object
+	// rather than from the evidence, because they are the only place that knows
+	// whether an absent number means "unlimited" or "could not be read". Printing
+	// nothing for either case would read as "no risk" in both.
+	if p := v.Projection; p.State != "" {
+		switch p.State {
+		case analyze.ProjectionUnlimited:
+			if _, err := fmt.Fprintf(tw, "  HEADROOM\tunlimited\tEMFILE is not reachable by descriptor count\n"); err != nil {
 				return err
 			}
-		} else if _, err := fmt.Fprintf(tw, "%d%% of the limit consumed\n", (ev.Limit-ev.Remaining)*100/ev.Limit); err != nil {
-			return err
+		case analyze.ProjectionLimitUnknown:
+			if _, err := fmt.Fprintf(tw, "  HEADROOM\tunknown\tthe process limit could not be read\n"); err != nil {
+				return err
+			}
+		case analyze.ProjectionAtLimit:
+			if _, err := fmt.Fprintf(tw, "  HEADROOM\t%d left of %d\tat or past the soft limit: EMFILE is imminent\n",
+				p.Remaining, p.Limit); err != nil {
+				return err
+			}
+		case analyze.Projected:
+			if _, err := fmt.Fprintf(tw, "  HEADROOM\t%d left of %d\tEMFILE in about %s at %s/s\n",
+				p.Remaining, p.Limit, p.HumanETA(), p.RateText()); err != nil {
+				return err
+			}
+			// The ETA is an extrapolation, so its basis is printed next to it:
+			// how many samples the rate came from, over how long, and how much
+			// the number deserves to be trusted.
+			if _, err := fmt.Fprintf(tw, "  PROJECTION\t%s\tconfidence %s\n", p.Note, p.Confidence); err != nil {
+				return err
+			}
+		default:
+			if p.Limit > 0 {
+				if _, err := fmt.Fprintf(tw, "  HEADROOM\t%d left of %d\t%d%% consumed, no ETA\n",
+					p.Remaining, p.Limit, (p.Limit-p.Remaining)*100/p.Limit); err != nil {
+					return err
+				}
+			}
 		}
 	}
 	return tw.Flush()

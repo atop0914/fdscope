@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/atop0914/fdscope/internal/model"
 	"github.com/atop0914/fdscope/internal/probe"
 	"github.com/atop0914/fdscope/internal/timeline"
 )
@@ -442,7 +443,10 @@ func TestLeakOptionsRejectImpossibleValues(t *testing.T) {
 		{"warmup at one", LeakOptions{Warmup: 1}},
 		{"warmup above one", LeakOptions{Warmup: 1.5}},
 		{"negative window", LeakOptions{MinWindowMillis: -1}},
-		{"negative limit", LeakOptions{Limit: -1}},
+		{"negative limit", LeakOptions{Limit: model.OpenLimit{State: model.LimitKnown, Soft: -1}}},
+		// A "known" limit of 0 is a parse failure dressed as a number: it would
+		// make every headroom subtraction negative and report an emergency.
+		{"known limit of zero", LeakOptions{Limit: model.OpenLimit{State: model.LimitKnown, Soft: 0}}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

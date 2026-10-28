@@ -36,6 +36,7 @@
 package fdscope
 
 import (
+	"github.com/atop0914/fdscope/internal/analyze"
 	"github.com/atop0914/fdscope/internal/model"
 	"github.com/atop0914/fdscope/internal/probe"
 )
@@ -53,6 +54,14 @@ type (
 	FingerprintCount = model.FingerprintCount
 	// Headroom reports how much of the open-file limit is consumed.
 	Headroom = model.Headroom
+	// OpenLimit is the process descriptor limit: a finite number, unlimited, or
+	// unknown. The three cases must stay apart; a 0 does not mean unlimited.
+	OpenLimit = model.OpenLimit
+	// LimitState says which of the three answers the kernel gave.
+	LimitState = model.LimitState
+	// Projection is the distance to EMFILE, with the rate and sample count it
+	// was computed from.
+	Projection = analyze.Projection
 	// FDKind classifies what a descriptor points at.
 	FDKind = model.FDKind
 	// Normalizer turns raw link targets into fingerprints.
@@ -71,6 +80,16 @@ const (
 	KindDir       = model.KindDir
 	KindDeleted   = model.KindDeleted
 	KindUnknown   = model.KindUnknown
+)
+
+// Limit states reported by fdscope.
+const (
+	// LimitKnown means a finite soft limit was read.
+	LimitKnown = model.LimitKnown
+	// LimitUnlimited means the kernel reported "unlimited".
+	LimitUnlimited = model.LimitUnlimited
+	// LimitUnknown means the limit could not be determined.
+	LimitUnknown = model.LimitUnknown
 )
 
 // Sentinel errors.
@@ -92,3 +111,8 @@ func NewNormalizer() Normalizer { return model.DefaultNormalizer() }
 
 // IsSupported reports whether this build can audit the running system.
 func IsSupported() bool { return probe.IsSupported() }
+
+// NewHeadroom builds the headroom view for used descriptors against limit.
+func NewHeadroom(pid, used int, limit OpenLimit) Headroom {
+	return model.NewHeadroom(pid, used, limit)
+}

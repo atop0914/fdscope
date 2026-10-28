@@ -83,9 +83,10 @@ type Snapshot struct {
 	Taken int64
 	// Descriptors holds every readable descriptor, ordered by FD.
 	Descriptors []Descriptor
-	// OpenLimit is the soft limit on open files, or 0 when it could not be
-	// determined. fdscope reports the headroom against this value.
-	OpenLimit int
+	// OpenLimit is the process descriptor limit at the moment of capture: a
+	// finite soft limit, "unlimited", or unknown. The three cases are distinct
+	// on purpose; a zero here would have to mean all three at once.
+	OpenLimit OpenLimit
 	// Unreadable counts descriptor entries that existed in the directory but
 	// could not be resolved. A non-zero value means the snapshot is partial
 	// and must be reported as such rather than silently treated as complete.
@@ -160,32 +161,80 @@ type FingerprintCount struct {
 //
 // The used value is the snapshot length rather than the kernel's global count,
 // because fdscope can only vouch for descriptors it actually read.
+//
+// Limit keeps its old meaning - the finite soft limit, or 0 when there is no
+// finite number to report - so that every existing reader of the JSON keeps
+// working. The additions say why it might be 0: State distinguishes "the kernel
+// said unlimited" from "the limit could not be read", and those two must never
+// be collapsed again. Known and Unlimited are redundant with State on purpose;
+// they are what a log query or a jq filter reaches for.
 type Headroom struct {
 	PID   int `json:"pid"`
 	Used  int `json:"used"`
 	Limit int `json:"limit"`
+	// Hard is the ceiling the soft limit can be raised to, 0 when unlimited or
+	// unreadable. A leak that will hit a low soft limit matters less when the
+	// hard limit is huge, and that fact should not have to be guessed.
+	Hard int `json:"limit_hard,omitempty"`
+	// State is one of "known", "unlimited", "unknown".
+	State LimitState `json:"limit_state"`
+	// Unlimited is true only when the kernel reported "unlimited".
+	Unlimited bool `json:"unlimited,omitempty"`
+	// Known is true only when Limit is a usable finite number.
+	Known bool `json:"limit_known"`
+}
+
+// NewHeadroom builds the headroom view for used descriptors against limit.
+func NewHeadroom(pid, used int, limit OpenLimit) Headroom {
+	l := limit.Normalized()
+	return Headroom{
+		PID:       pid,
+		Used:      used,
+		Limit:     l.Soft,
+		Hard:      l.Hard,
+		State:     l.StateOrUnknown(),
+		Unlimited: l.Unlimited(),
+		Known:     l.Known(),
+	}
+}
+
+// LimitValue reconstructs the limit this headroom was built from.
+func (h Headroom) LimitValue() OpenLimit {
+	return OpenLimit{State: h.State, Soft: h.Limit, Hard: h.Hard}.Normalized()
 }
 
 // Remaining is the number of descriptors left before allocation starts
 // failing. It is negative when the process is already over a lowered limit,
-// which really happens after `ulimit -n` is shrunk on a running process.
-func (h Headroom) Remaining() int { return h.Limit - h.Used }
+// which really happens after `ulimit -n` is shrunk on a running process. The
+// second result is false when no finite limit is known - the case where a
+// subtraction would produce a number that means nothing.
+func (h Headroom) Remaining() (int, bool) {
+	return h.LimitValue().Remaining(h.Used)
+}
 
-// UsagePercent is the consumed share of the limit, or 0 when the limit is
-// unknown. It is intentionally a float so that 4095/4096 does not report 100%.
+// UsagePercent is the consumed share of the limit, or 0 when the limit is not a
+// finite number. It is intentionally a float so that 4095/4096 does not report
+// 100%.
 func (h Headroom) UsagePercent() float64 {
-	if h.Limit <= 0 {
+	if !h.Known || h.Limit <= 0 {
 		return 0
 	}
 	return float64(h.Used) / float64(h.Limit) * 100
 }
 
 // String renders headroom for human output.
+//
+// "unlimited" and "unknown" are printed as words rather than as a number: a
+// reader who sees "0/0 open" concludes the process is at its limit.
 func (h Headroom) String() string {
-	if h.Limit <= 0 {
-		return fmt.Sprintf("%d open (limit unknown)", h.Used)
+	switch h.LimitValue().StateOrUnknown() {
+	case LimitKnown:
+		left, _ := h.Remaining()
+		return fmt.Sprintf("%d/%d open (%.1f%%), %d remaining", h.Used, h.Limit, h.UsagePercent(), left)
+	case LimitUnlimited:
+		return fmt.Sprintf("%d open (limit unlimited)", h.Used)
 	}
-	return fmt.Sprintf("%d/%d open (%.1f%%), %d remaining", h.Used, h.Limit, h.UsagePercent(), h.Remaining())
+	return fmt.Sprintf("%d open (limit unknown)", h.Used)
 }
 
 // TargetKind classifies a raw readlink target. The rules are ordered from most

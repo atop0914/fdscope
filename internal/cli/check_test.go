@@ -7,10 +7,16 @@ import (
 	"fmt"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
 )
+
+// sixDigitSecondCount matches a duration printed as five or more digits of
+// seconds. It is the shape of the value the previous round printed - "crossed in
+// about 524278s" - which was arithmetically right and unusable.
+var sixDigitSecondCount = regexp.MustCompile(`\b\d{5,}s\b`)
 
 // These tests run the shipped binary against real child processes, because the
 // contract under test is the one a CI job consumes: three exit codes and a
@@ -35,6 +41,28 @@ type checkJSON struct {
 	} `json:"thresholds"`
 	Totals  []int  `json:"totals"`
 	Summary string `json:"summary"`
+	// Headroom and Projection are the Day 6 additions. They are asserted through
+	// the wire rather than from the Go structs because the three limit states are
+	// only useful if they survive into the document a CI job parses.
+	Headroom struct {
+		PID       int    `json:"pid"`
+		Used      int    `json:"used"`
+		Limit     int    `json:"limit"`
+		Hard      int    `json:"limit_hard"`
+		State     string `json:"limit_state"`
+		Unlimited bool   `json:"unlimited"`
+		Known     bool   `json:"limit_known"`
+	} `json:"headroom"`
+	Projection struct {
+		State         string  `json:"state"`
+		Limit         int     `json:"limit"`
+		Remaining     int     `json:"remaining"`
+		RatePerSecond float64 `json:"rate_per_second"`
+		RateSamples   int     `json:"rate_samples"`
+		ETASeconds    float64 `json:"eta_seconds"`
+		Confidence    string  `json:"confidence"`
+		Note          string  `json:"note"`
+	} `json:"projection"`
 	Verdict struct {
 		Leaking bool `json:"leaking"`
 		Total   struct {
@@ -45,6 +73,8 @@ type checkJSON struct {
 				WindowSamples  int `json:"window_samples"`
 				Growth         int `json:"growth"`
 				GrowthRequired int `json:"growth_required"`
+				RiseStartIndex int `json:"rise_start_index"`
+				RiseSamples    int `json:"rise_samples"`
 			} `json:"evidence"`
 		} `json:"total"`
 	} `json:"verdict"`
@@ -199,6 +229,159 @@ while :; do sleep 0.05; done
 	if first, last := rep.Totals[0], rep.Totals[len(rep.Totals)-1]; last != first {
 		t.Fatalf("the fixture did not hold a level (%d -> %d, %v): it is not testing what it claims",
 			first, last, rep.Totals)
+	}
+
+	// The headroom is still reported on a clean run - "not leaking" must not hide
+	// that a process is sitting close to its limit - and the limit state is the
+	// one the container really has.
+	if !rep.Headroom.Known {
+		t.Fatalf("headroom.limit_known = false for a live process: %+v", rep.Headroom)
+	}
+	if rep.Headroom.State != "known" {
+		t.Fatalf("headroom.limit_state = %q, want known", rep.Headroom.State)
+	}
+	if rep.Headroom.Limit <= 0 {
+		t.Fatalf("headroom.limit = %d, want the process's real soft limit", rep.Headroom.Limit)
+	}
+	if rep.Headroom.Used != rep.Totals[len(rep.Totals)-1] {
+		t.Fatalf("headroom.used = %d, want the last sample's total %d",
+			rep.Headroom.Used, rep.Totals[len(rep.Totals)-1])
+	}
+
+	// The reverse assertion for the projection: a flat window produces no ETA.
+	// A countdown here would be a prediction manufactured out of no growth.
+	if rep.Projection.ETASeconds != 0 {
+		t.Fatalf("projection.eta_seconds = %v on a flat window; a non-leak must not be given a countdown",
+			rep.Projection.ETASeconds)
+	}
+	if rep.Projection.State != "no-growth" {
+		t.Fatalf("projection.state = %q, want no-growth", rep.Projection.State)
+	}
+}
+
+// TestCheckReportsHeadroomAgainstARealLowLimit is the acceptance case for Day 6:
+// a real child raises nothing but lowers its own RLIMIT_NOFILE, fills most of it,
+// and then leaks into the remainder. The limit, the remaining count and the ETA
+// must all come from that process rather than from a fixture.
+func TestCheckReportsHeadroomAgainstARealLowLimit(t *testing.T) {
+	bin := buildCLI(t)
+	// 40 descriptors held, then one every 100ms. The limit is 64, so the window
+	// ends with roughly a dozen descriptors left and the child does not hit
+	// EMFILE mid-run - a fixture that died would turn this into a test of the
+	// "lost the target" path instead.
+	ch, dir := stagedChild(t, `
+ulimit -n 64
+echo ready
+i=0
+while [ $i -lt 30 ]; do
+  i=$((i+1))
+  exec {fd}>"$d/fill-$i.log"
+done
+while :; do
+  i=$((i+1))
+  exec {fd}>"$d/leak-$i.log"
+  sleep 0.1
+done
+`)
+
+	out, errOut, err := runCheckCLI(t, bin, strconv.Itoa(ch.pid()), "--json",
+		"--interval", "100ms", "--samples", "12", "--min-growth", "5")
+
+	if got := exitCodeOf(t, err); got != ExitLeakFound {
+		t.Fatalf("exit = %d, want %d\nstdout:\n%s\nstderr:\n%s", got, ExitLeakFound, out, errOut)
+	}
+	var rep checkJSON
+	if err := json.Unmarshal([]byte(out), &rep); err != nil {
+		t.Fatalf("--json did not produce a parseable document: %v\n%s", err, out)
+	}
+
+	// The premise: the child really did lower its own limit, so the number below
+	// is read from /proc/<pid>/limits and not from the test's imagination.
+	if rep.Headroom.Limit != 64 {
+		t.Fatalf("headroom.limit = %d, want the 64 the child set with ulimit", rep.Headroom.Limit)
+	}
+	if !rep.Headroom.Known || rep.Headroom.State != "known" {
+		t.Fatalf("headroom limit state = %q (known=%t), want known", rep.Headroom.State, rep.Headroom.Known)
+	}
+	if rep.Headroom.Hard < 64 {
+		t.Fatalf("headroom.limit_hard = %d, want the hard column of the limits file", rep.Headroom.Hard)
+	}
+	last := rep.Totals[len(rep.Totals)-1]
+	if rep.Headroom.Used != last {
+		t.Fatalf("headroom.used = %d, want the last sample's total %d", rep.Headroom.Used, last)
+	}
+	if want := 64 - last; rep.Headroom.Limit-rep.Headroom.Used != want {
+		t.Fatalf("remaining = %d, want %d (64 - %d open)", rep.Headroom.Limit-rep.Headroom.Used, want, last)
+	}
+
+	// The ETA must be reproducible from the document itself: the rate has to
+	// describe the judged window's own series, in descriptors per *second*.
+	//
+	// This is where the old unit bug lived. It divided the remaining descriptors
+	// by descriptors-per-*sample*, so on a 100ms interval the countdown came out
+	// ten times too long - arithmetically consistent with nothing, and impossible
+	// to notice without comparing the rate against the series it came from.
+	if rep.Projection.State != "projected" {
+		t.Fatalf("projection.state = %q, want projected: %+v", rep.Projection.State, rep.Projection)
+	}
+	ev := rep.Verdict.Total.Evidence
+	if ev.RiseSamples < 2 || ev.RiseStartIndex < 0 || ev.RiseStartIndex+ev.RiseSamples > len(rep.Totals) {
+		t.Fatalf("the verdict's rise window (%d at %d) does not fit the series (%d samples)",
+			ev.RiseSamples, ev.RiseStartIndex, len(rep.Totals))
+	}
+	rise := rep.Totals[ev.RiseStartIndex : ev.RiseStartIndex+ev.RiseSamples]
+	observedRate := float64(rise[len(rise)-1]-rise[0]) / (float64(len(rise)-1) * 0.1)
+	if observedRate <= 0 {
+		t.Fatalf("the judged window did not rise (%v), so there is no rate to check against", rise)
+	}
+	if diff := rep.Projection.RatePerSecond - observedRate; diff > observedRate*0.2 || diff < -observedRate*0.2 {
+		t.Fatalf("projection.rate = %.3f/s, but the series it claims to describe rose %.3f/s (%v)",
+			rep.Projection.RatePerSecond, observedRate, rise)
+	}
+	wantETA := float64(rep.Projection.Remaining) / observedRate
+	if diff := rep.Projection.ETASeconds - wantETA; diff > wantETA*0.2 || diff < -wantETA*0.2 {
+		t.Fatalf("eta_seconds = %.2f, want %.2f +/-20%% (remaining %d at %.3f/s)",
+			rep.Projection.ETASeconds, wantETA, rep.Projection.Remaining, observedRate)
+	}
+	// A sanity floor on the fixture: if the child had stopped opening, the
+	// series above would be flat and this test would be asserting on nothing.
+	if observedRate < 1 {
+		t.Fatalf("the child opened descriptors at only %.3f/s; it was not leaking during the window", observedRate)
+	}
+	if rep.Projection.Note == "" {
+		t.Fatal("projection.note is empty: an ETA must carry the basis it was computed from")
+	}
+
+	// The reason string is what an operator reads first, and it must be the same
+	// story with a readable unit.
+	reason := rep.Verdict.Total.Reason
+	if sixDigitSecondCount.MatchString(reason) {
+		t.Fatalf("reason = %q contains a six-digit second count", reason)
+	}
+	if !strings.Contains(reason, "below the limit of 64") {
+		t.Fatalf("reason = %q, want it to name the limit of 64", reason)
+	}
+
+	// And the same numbers must be on the table for a human reading the log.
+	out2, errOut2, err2 := runCheckCLI(t, bin, strconv.Itoa(ch.pid()),
+		"--interval", "100ms", "--samples", "12", "--min-growth", "5")
+	if got := exitCodeOf(t, err2); got != ExitLeakFound {
+		t.Fatalf("table run exit = %d, want %d\n%s\n%s", got, ExitLeakFound, out2, errOut2)
+	}
+	if !strings.Contains(out2, "left of 64") {
+		t.Fatalf("the table does not show the headroom against 64:\n%s", out2)
+	}
+	if sixDigitSecondCount.MatchString(out2) {
+		t.Fatalf("the table contains a six-digit second count:\n%s", out2)
+	}
+	// The fixture's files exist, so the leak was real and not a phantom of the
+	// sampler: this anchors the whole test to a side effect.
+	opened, globErr := filepath.Glob(filepath.Join(dir, "leak-*.log"))
+	if globErr != nil {
+		t.Fatalf("glob: %v", globErr)
+	}
+	if len(opened) < 8 {
+		t.Fatalf("the child opened only %d leaked files during the window", len(opened))
 	}
 }
 

@@ -60,18 +60,43 @@ $ grep "open files" /proc/1/limits
 Max open files            1048576              1048576              files
 ```
 
-两列分别是 **soft limit** 与 **hard limit**。
+两列分别是 **soft limit** 与 **hard limit**。任一列都可能不是数字，而是字面量
+`unlimited`；文件本身也可能读不到。
 
 **fdscope 用 soft limit**，因为进程实际撞到的是它。
+
+**三种状态必须分开（Day 6 修正的正是这里）**：
+
+```console
+$ cat /proc/1/limits | grep "open files"
+Max open files            1048576              1048576              files      # known
+Max open files            unlimited            unlimited            files      # unlimited
+# 文件不存在 / 无权限 / 行格式变了                                              # unknown
+```
+
+- `known`：soft 是有限数字，可以做「余量 = limit - used」。
+- `unlimited`：内核说无限，**EMFILE 不可达**，没有「快撞上限」这回事。
+- `unknown`：读不到。它既不是无限，也不是 0。
+
+三态共用一个 `0` 是这一层最容易犯、后果最严重的错：把 unlimited 当 0 会算出
+「余量 -3800，立刻 EMFILE」的假告警；把「读不到」当 unlimited 会把真风险藏起来。
+两个方向的错都不是「少一点精度」，而是相反的结论。
 
 **陷阱（这一条很容易搞错）**：
 
 - 拿 hard limit 会得出「还有 100 万个余量」，而进程在 soft limit 处就已经 `EMFILE` 了。
+- soft 为数字、hard 为 `unlimited` 是合法组合（root 提过 hard 但没提 soft），
+  此时按 **soft** 判：仍然是已知的有限上限。
 - 行格式由内核固定宽度打印，但**用 `strings.Fields` 按空白切分比按列位置切分稳**。
-- 文件读不到时（容器限制、隐藏）返回 `0`。**调用方必须把 0 当「未知」，
-  不能当「无限」** —— 「未知」与「无限」对风险的结论完全相反。
+  切出来是 `["Max","open","files", soft, hard, units]`，下标固定。
 - soft limit 可以被**运行中**的进程下调。此时 `Used` 可能大于 `Limit`，
   余量会算出负数。这不是 bug，是真实状态，必须如实显示。
+- **预测是外推，不是预言**：余量除以实测速率得到的是「按此速率还要多久」。
+  速率来自一个几秒的窗口，而 ETA 可能要按天算 —— 跨度差 5 个数量级，
+  所以 `Projection` 必须带上样本数、窗口长度和置信度一起输出，
+  并且不泄漏时**不产出 ETA**（用 ∞ 或 0 表示「不适用」都会被读成结论）。
+- ETA 的可读性也是正确性的一部分：`524278s` 这种六位数秒没人会换算，
+  超过一天一律换成天，「一个月以外」直接说远离上限。
 
 ## 4. 为什么不用 `/proc/<pid>/exe`、`/proc/<pid>/maps`
 

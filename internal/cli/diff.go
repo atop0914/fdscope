@@ -143,8 +143,9 @@ func buildDiffReport(d diff.Diff, deleted deletedReport) diffReport {
 		// anyone eyeballing "total unchanged" would otherwise stop here.
 		notes = append(notes, "descriptor total is unchanged but resources moved (descriptor numbers were reused)")
 	}
-	if d.BeforeLimit != d.AfterLimit {
-		notes = append(notes, fmt.Sprintf("open-file limit changed from %d to %d while sampling", d.BeforeLimit, d.AfterLimit))
+	if d.LimitChanged() {
+		notes = append(notes, fmt.Sprintf("open-file limit changed from %s to %s while sampling",
+			d.BeforeLimitValue().Describe(), d.AfterLimitValue().Describe()))
 	}
 	return diffReport{
 		PID:         d.PID,
@@ -153,7 +154,7 @@ func buildDiffReport(d diff.Diff, deleted deletedReport) diffReport {
 		BeforeTotal: d.BeforeTotal,
 		AfterTotal:  d.AfterTotal,
 		NetChange:   d.NetDescriptorChange(),
-		Headroom:    model.Headroom{PID: d.PID, Used: d.AfterTotal, Limit: d.AfterLimit},
+		Headroom:    model.NewHeadroom(d.PID, d.AfterTotal, d.AfterLimitValue()),
 		Changes:     changes,
 		// Changed mirrors Changes; it exists because "changes" is easy to
 		// confuse with "changed resources only" when reading a report, and a

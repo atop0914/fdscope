@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/atop0914/fdscope/internal/analyze"
+	"github.com/atop0914/fdscope/internal/model"
 	"github.com/atop0914/fdscope/internal/probe"
 )
 
@@ -121,6 +122,10 @@ type CheckResult struct {
 	// the series the verdict was computed on: a verdict that cannot be reproduced
 	// from its own input is an opinion.
 	Totals []int
+	// Headroom is the distance to the soft limit at the last sample. It is
+	// reported even when nothing is leaking, because "unlimited" and "could not
+	// be read" are facts a reader needs on a clean run too.
+	Headroom model.Headroom
 	// Report is the verdict.
 	Report LeakReport
 }
@@ -205,12 +210,19 @@ func CheckPID(pid int, opts CheckOptions) (CheckResult, error) {
 		return CheckResult{}, fmt.Errorf("no verdict for pid %d: %s", pid, rep.Total.Reason)
 	}
 
+	totals := res.Timeline.TotalSeries().Counts
+	last := 0
+	if len(totals) > 0 {
+		last = totals[len(totals)-1]
+	}
+
 	return CheckResult{
 		PID:        pid,
 		Interval:   opt.Interval,
 		Snapshots:  res.Snapshots,
 		Incomplete: res.Incomplete,
-		Totals:     res.Timeline.TotalSeries().Counts,
+		Totals:     totals,
+		Headroom:   model.NewHeadroom(pid, last, res.Timeline.Limit()),
 		Report:     rep,
 	}, nil
 }

@@ -1,6 +1,7 @@
 package model
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -207,23 +208,101 @@ func TestTargetKind(t *testing.T) {
 }
 
 func TestHeadroom(t *testing.T) {
-	h := Headroom{PID: 1, Used: 4095, Limit: 4096}
-	if got := h.Remaining(); got != 1 {
-		t.Errorf("Remaining = %d, want 1", got)
+	h := NewHeadroom(1, 4095, KnownLimit(4096))
+	if got, ok := h.Remaining(); !ok || got != 1 {
+		t.Errorf("Remaining = %d (ok=%t), want 1", got, ok)
 	}
 	if got := h.UsagePercent(); got < 99.9 || got > 100 {
 		t.Errorf("UsagePercent = %f, want just under 100", got)
 	}
 	// A shrunk limit really does leave a running process over the limit; the
 	// remaining count must go negative rather than clamping to zero.
-	over := Headroom{PID: 1, Used: 5000, Limit: 4096}
-	if got := over.Remaining(); got != -904 {
-		t.Errorf("Remaining = %d, want -904", got)
+	over := NewHeadroom(1, 5000, KnownLimit(4096))
+	if got, ok := over.Remaining(); !ok || got != -904 {
+		t.Errorf("Remaining = %d (ok=%t), want -904", got, ok)
 	}
-	// Unknown limit must not divide by zero or claim 100%.
-	unknown := Headroom{Used: 10, Limit: 0}
+	// An unreadable limit must not divide by zero, must not claim 100%, and must
+	// not pretend a number is available.
+	unknown := NewHeadroom(1, 10, UnknownLimit())
 	if got := unknown.UsagePercent(); got != 0 {
 		t.Errorf("UsagePercent with unknown limit = %f, want 0", got)
+	}
+	if _, ok := unknown.Remaining(); ok {
+		t.Error("Remaining returned a number for an unknown limit")
+	}
+	if got, want := unknown.String(), "10 open (limit unknown)"; got != want {
+		t.Errorf("String() = %q, want %q", got, want)
+	}
+}
+
+// TestHeadroomThreeStatesAreDistinguishable is the acceptance test for Day 6's
+// first half: "unlimited" and "could not be read" must never print the same
+// thing, because they mean opposite things about risk.
+func TestHeadroomThreeStatesAreDistinguishable(t *testing.T) {
+	states := []struct {
+		name   string
+		limit  OpenLimit
+		want   string
+		banned string
+	}{
+		{
+			name:   "finite",
+			limit:  KnownLimit(4096),
+			want:   "100/4096 open (2.4%), 3996 remaining",
+			banned: "unlimited",
+		},
+		{
+			name:   "unlimited",
+			limit:  UnlimitedLimit(),
+			want:   "100 open (limit unlimited)",
+			banned: "unknown",
+		},
+		{
+			name:   "unknown",
+			limit:  UnknownLimit(),
+			want:   "100 open (limit unknown)",
+			banned: "unlimited",
+		},
+		{
+			// The zero value is what a forgotten assignment looks like. It must
+			// read as unknown, not as "0/0 open" and not as unlimited.
+			name:   "zero value",
+			limit:  OpenLimit{},
+			want:   "100 open (limit unknown)",
+			banned: "unlimited",
+		},
+	}
+	for _, tc := range states {
+		t.Run(tc.name, func(t *testing.T) {
+			got := NewHeadroom(7, 100, tc.limit).String()
+			if got != tc.want {
+				t.Errorf("String() = %q, want %q", got, tc.want)
+			}
+			if strings.Contains(got, tc.banned) {
+				t.Errorf("String() = %q must not contain %q", got, tc.banned)
+			}
+		})
+	}
+
+	// JSON keeps the old field names and adds the state; a caller that reads
+	// only `limit` must still see 4096 for a finite limit and 0 otherwise.
+	raw, err := json.Marshal(NewHeadroom(1, 10, KnownLimit(4096)))
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	for _, want := range []string{`"pid":1`, `"used":10`, `"limit":4096`, `"limit_state":"known"`, `"limit_known":true`} {
+		if !strings.Contains(string(raw), want) {
+			t.Errorf("JSON %s missing %s", raw, want)
+		}
+	}
+	raw, err = json.Marshal(NewHeadroom(1, 10, UnlimitedLimit()))
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	for _, want := range []string{`"limit":0`, `"limit_state":"unlimited"`, `"unlimited":true`, `"limit_known":false`} {
+		if !strings.Contains(string(raw), want) {
+			t.Errorf("JSON %s missing %s", raw, want)
+		}
 	}
 }
 

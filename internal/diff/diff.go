@@ -82,9 +82,15 @@ type Diff struct {
 	// BeforeTotal and AfterTotal are the descriptor counts at each point.
 	BeforeTotal int `json:"before_total"`
 	AfterTotal  int `json:"after_total"`
-	// BeforeLimit and AfterLimit are the soft open-file limits, 0 = unknown.
-	BeforeLimit int `json:"before_limit"`
-	AfterLimit  int `json:"after_limit"`
+	// BeforeLimit and AfterLimit are the finite soft open-file limits, 0 when
+	// there is no finite number. The two state fields say which kind of "no
+	// number" it is: unlimited, or unreadable. They are separate fields rather
+	// than one object so that the existing before_limit/after_limit numbers keep
+	// their shape for callers that already parse them.
+	BeforeLimit      int    `json:"before_limit"`
+	AfterLimit       int    `json:"after_limit"`
+	BeforeLimitState string `json:"before_limit_state,omitempty"`
+	AfterLimitState  string `json:"after_limit_state,omitempty"`
 	// Changes lists every fingerprint whose count moved, largest absolute
 	// delta first (growth before shrinkage at equal magnitude).
 	Changes []Change `json:"changes"`
@@ -113,6 +119,33 @@ func (d Diff) Unchanged() bool { return len(d.Changes) == 0 }
 // Unchanged() is false, and that combination is exactly the fd-number-reuse
 // case fdscope has to survive.
 func (d Diff) NetDescriptorChange() int { return d.AfterTotal - d.BeforeTotal }
+
+// BeforeLimitValue and AfterLimitValue rebuild the limits from their split wire
+// fields, degrading anything inconsistent to unknown.
+func (d Diff) BeforeLimitValue() model.OpenLimit {
+	return model.LimitOf(model.LimitState(d.BeforeLimitState), d.BeforeLimit)
+}
+
+// AfterLimitValue is the limit at the second observation.
+func (d Diff) AfterLimitValue() model.OpenLimit {
+	return model.LimitOf(model.LimitState(d.AfterLimitState), d.AfterLimit)
+}
+
+// LimitChanged reports whether the limit moved between the two observations.
+//
+// The state is part of the comparison: a process that went from "unreadable" to
+// 1024 did not change its limit, it became observable, and the note that says
+// otherwise would send a reader looking for a ulimit call that never happened.
+func (d Diff) LimitChanged() bool {
+	before, after := d.BeforeLimitValue(), d.AfterLimitValue()
+	if before.StateOrUnknown() == model.LimitUnknown || after.StateOrUnknown() == model.LimitUnknown {
+		return false
+	}
+	if before.StateOrUnknown() != after.StateOrUnknown() {
+		return true
+	}
+	return before.Soft != after.Soft
+}
 
 // filterSign selects changes by the sign of Delta.
 //
@@ -169,15 +202,19 @@ func Compare(before, after model.Snapshot, beforeStart, afterStart uint64) (Diff
 
 	beforeGroups := before.CountByFingerprint()
 	afterGroups := after.CountByFingerprint()
+	beforeLimit := before.OpenLimit.Normalized()
+	afterLimit := after.OpenLimit.Normalized()
 
 	d := Diff{
-		PID:         before.PID,
-		BeforeTaken: before.Taken,
-		AfterTaken:  after.Taken,
-		BeforeTotal: before.Len(),
-		AfterTotal:  after.Len(),
-		BeforeLimit: before.OpenLimit,
-		AfterLimit:  after.OpenLimit,
+		PID:              before.PID,
+		BeforeTaken:      before.Taken,
+		AfterTaken:       after.Taken,
+		BeforeTotal:      before.Len(),
+		AfterTotal:       after.Len(),
+		BeforeLimit:      beforeLimit.Soft,
+		AfterLimit:       afterLimit.Soft,
+		BeforeLimitState: string(beforeLimit.StateOrUnknown()),
+		AfterLimitState:  string(afterLimit.StateOrUnknown()),
 	}
 
 	seen := make(map[string]struct{}, len(beforeGroups)+len(afterGroups))

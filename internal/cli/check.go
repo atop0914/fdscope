@@ -162,9 +162,16 @@ type checkReport struct {
 	// Totals is the process descriptor total at each sample. It is always
 	// present, unlike on `watch`: a check is the document a CI job keeps, and a
 	// verdict nobody can reproduce from its own input is an opinion.
-	Totals  []int              `json:"totals"`
-	Verdict fdscope.LeakReport `json:"verdict"`
-	Summary string             `json:"summary"`
+	Totals []int `json:"totals"`
+	// Headroom is the distance to the soft limit at the end of the window, and
+	// Projection is the same series' extrapolation. Both are hoisted from the
+	// verdict so a CI job does not have to know which series the process total
+	// was called; they are copies of verdict.total's values, not a second
+	// computation that could disagree with it.
+	Headroom   fdscope.Headroom   `json:"headroom"`
+	Projection fdscope.Projection `json:"projection"`
+	Verdict    fdscope.LeakReport `json:"verdict"`
+	Summary    string             `json:"summary"`
 }
 
 func buildCheckReport(res fdscope.CheckResult, leak fdscope.LeakOptions) checkReport {
@@ -182,9 +189,11 @@ func buildCheckReport(res fdscope.CheckResult, leak fdscope.LeakOptions) checkRe
 			MinSamples:       leak.MinSamples,
 			Warmup:           leak.Warmup,
 		},
-		Totals:  res.Totals,
-		Verdict: res.Report,
-		Summary: fdscope.Summarize(res.Report),
+		Totals:     res.Totals,
+		Headroom:   res.Headroom,
+		Projection: res.Report.Total.Projection,
+		Verdict:    res.Report,
+		Summary:    fdscope.Summarize(res.Report),
 	}
 }
 

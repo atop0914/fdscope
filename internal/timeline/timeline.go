@@ -18,6 +18,8 @@ package timeline
 import (
 	"fmt"
 	"sort"
+
+	"github.com/atop0914/fdscope/internal/model"
 )
 
 // Sample is the fingerprint breakdown of one observation.
@@ -37,11 +39,12 @@ type Sample struct {
 	Total int
 	// Counts maps fingerprint to the number of descriptors holding it.
 	Counts map[string]int
-	// Limit is the process's descriptor soft limit at this sample, or 0 when it
-	// could not be read. It is recorded per sample rather than once because a
-	// process may raise its own limit while being watched, and a headroom figure
-	// computed against a limit that has since changed would be a lie.
-	Limit int
+	// Limit is the process's descriptor limit at this sample: a finite number,
+	// "unlimited", or unknown. It is recorded per sample rather than once
+	// because a process may raise its own limit while being watched, and a
+	// headroom figure computed against a limit that has since changed would be
+	// a lie.
+	Limit model.OpenLimit
 }
 
 // Count returns the number of descriptors that held fp in this sample, or 0 when
@@ -238,17 +241,21 @@ func (t *Timeline) Fingerprints() []string {
 	return out
 }
 
-// Limit returns the most recent non-zero descriptor limit seen in the window, or 0.
+// Limit returns the most recent descriptor limit the window established.
 //
 // The most recent, not the first: a process that raised its limit mid-run is now
-// constrained by the new value, and the headroom figure must follow.
-func (t *Timeline) Limit() int {
+// constrained by the new value, and the headroom figure must follow. A sample
+// whose limit could not be read does not overwrite an earlier answer - "I could
+// not read it this time" is not news about the limit - but "unlimited" does,
+// because it is an answer.
+func (t *Timeline) Limit() model.OpenLimit {
 	for i := len(t.samples) - 1; i >= 0; i-- {
-		if s := t.samples[t.index(i)]; s.Limit > 0 {
-			return s.Limit
+		l := t.samples[t.index(i)].Limit
+		if !l.Unknown() {
+			return l
 		}
 	}
-	return 0
+	return model.UnknownLimit()
 }
 
 // Last returns the newest retained sample.

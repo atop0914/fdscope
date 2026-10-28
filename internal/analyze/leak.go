@@ -36,6 +36,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/atop0914/fdscope/internal/model"
 	"github.com/atop0914/fdscope/internal/timeline"
 )
 
@@ -70,6 +71,10 @@ type LeakVerdict struct {
 	Confidence Confidence `json:"confidence"`
 	// Reason is a one-line, human-readable explanation of the verdict.
 	Reason string `json:"reason"`
+	// Projection says how far the limit is: an ETA when the verdict convicted a
+	// leak, and otherwise the state of the limit itself. It is always present so
+	// that "unlimited" and "could not be read" are visible even on a clean run.
+	Projection Projection `json:"projection"`
 	// Evidence is the per-criterion breakdown. A verdict without its numbers is
 	// an opinion; a reader must be able to see which threshold was crossed and
 	// by how much, and a test must be able to assert on it.
@@ -165,10 +170,11 @@ type LeakOptions struct {
 	MinWindowMillis int64
 	// MinSamples is the shortest series that can be judged at all.
 	MinSamples int
-	// Limit is the descriptor limit of the process, when known. It is used only
-	// for the headroom figure, never for the verdict: a leak is a leak whether
-	// or not the process is close to EMFILE.
-	Limit int
+	// Limit is the descriptor limit of the process. It is used for the headroom
+	// figure and the EMFILE projection, never for the verdict: a leak is a leak
+	// whether or not the process is close to EMFILE. The zero value means
+	// "unknown", which is not the same as "unlimited".
+	Limit model.OpenLimit
 }
 
 // DefaultLeakOptions returns the thresholds used when the caller configures none.
@@ -231,8 +237,13 @@ func (o LeakOptions) normalize() (LeakOptions, error) {
 	if o.MinSamples == 0 {
 		o.MinSamples = def.MinSamples
 	}
-	if o.Limit < 0 {
-		return LeakOptions{}, fmt.Errorf("descriptor limit must not be negative, got %d", o.Limit)
+	if o.Limit.Soft < 0 {
+		return LeakOptions{}, fmt.Errorf("descriptor limit must not be negative, got %d", o.Limit.Soft)
+	}
+	if o.Limit.State == model.LimitKnown && o.Limit.Soft == 0 {
+		// A known limit of zero is a parse failure that tried to look like a
+		// number. Reject it rather than let it turn into "already over".
+		return LeakOptions{}, fmt.Errorf("a known descriptor limit must be positive")
 	}
 	return o, nil
 }
@@ -273,9 +284,15 @@ func JudgeSeries(s timeline.Series, samplePeriod time.Duration, opts LeakOptions
 	if len(taken) > 1 {
 		ev.WindowMillis = (taken[len(taken)-1] - taken[0]) / int64(time.Millisecond)
 	}
-	if opt.Limit > 0 && len(s.Counts) > 0 {
-		ev.Limit = opt.Limit
-		ev.Remaining = opt.Limit - s.Counts[len(s.Counts)-1]
+	// The evidence rows keep their old shape: Limit is the finite soft limit, 0
+	// when there is no finite number, and Remaining is the headroom at the last
+	// sample. The reason a limit might be 0 lives in the projection, which
+	// distinguishes "unlimited" from "could not be read".
+	if len(s.Counts) > 0 {
+		if left, ok := opt.Limit.Remaining(s.Counts[len(s.Counts)-1]); ok {
+			ev.Limit = opt.Limit.Soft
+			ev.Remaining = left
+		}
 	}
 
 	// Too short to judge. This is a refusal, not a "no leak": three points cannot
@@ -284,6 +301,11 @@ func JudgeSeries(s timeline.Series, samplePeriod time.Duration, opts LeakOptions
 	if len(s.Counts) < opt.MinSamples {
 		v.Reason = fmt.Sprintf("not enough samples to judge (%d, need %d)", len(s.Counts), opt.MinSamples)
 		v.Evidence = ev
+		proj, projErr := Project(s.Counts, samplePeriod, opt.Limit)
+		if projErr != nil {
+			return LeakVerdict{}, projErr
+		}
+		v.Projection = proj.WithoutETA("no verdict: the window is too short to project from")
 		return v, nil
 	}
 
@@ -355,6 +377,11 @@ func JudgeSeries(s timeline.Series, samplePeriod time.Duration, opts LeakOptions
 		ev.Monotonic = true
 		v.Confidence = confidenceFor(span(window, samplePeriod), opt)
 		v.Evidence = ev
+		proj, projErr := Project(window, samplePeriod, opt.Limit)
+		if projErr != nil {
+			return LeakVerdict{}, projErr
+		}
+		v.Projection = proj.WithoutETA("no rise in the window: nothing to extrapolate")
 		return v, nil
 	}
 
@@ -416,6 +443,16 @@ func JudgeSeries(s timeline.Series, samplePeriod time.Duration, opts LeakOptions
 		ev.GrowthRequired = byRatio
 	}
 
+	// The projection is computed from the judged window, once, and carried by
+	// every verdict that follows. It is set before the criteria below so that a
+	// "no leak" verdict still reports the limit state - a process that is not
+	// leaking can still be unlimited, or still be at its limit.
+	proj, projErr := Project(rise, samplePeriod, opt.Limit)
+	if projErr != nil {
+		return LeakVerdict{}, projErr
+	}
+	v.Projection = proj
+
 	// Monotonicity: nothing may come back down after the peak. The walk starts just
 	// after the first sample at the maximum, so a series that touched its peak for a
 	// single sample and closed everything right after is still seen to have fallen -
@@ -437,6 +474,7 @@ func JudgeSeries(s timeline.Series, samplePeriod time.Duration, opts LeakOptions
 		v.Reason = fmt.Sprintf("fell back %d from its peak of %d: a resource released is work done, not a leak",
 			ev.FallbackAfterPeak, peak)
 		v.Evidence = ev
+		v.Projection = proj.WithoutETA("no leak: the count fell back, so there is nothing to extrapolate")
 		return v, nil
 	}
 
@@ -461,17 +499,18 @@ func JudgeSeries(s timeline.Series, samplePeriod time.Duration, opts LeakOptions
 	if !growthOK || !rateOK || !ev.RateSustained {
 		v.Reason = noLeakReason(ev, growthOK, rateOK)
 		v.Evidence = ev
+		v.Projection = proj.WithoutETA("no leak: nothing to extrapolate at this rate")
 		return v, nil
 	}
 
 	v.Leak = true
 	v.Reason = fmt.Sprintf("grew %d descriptors (%.0f%%) to %d over %.1fs and did not fall back",
 		growth, percentOf(growth, rest), peak, spanSeconds)
-	if eta := timeToLimit(peak, growth, len(rise), opt.Limit); eta > 0 {
-		v.Reason += fmt.Sprintf("; the limit of %d is crossed in about %.0fs at this rate", opt.Limit, eta)
-	} else if opt.Limit > 0 {
-		v.Reason += fmt.Sprintf("; %d descriptors below the limit of %d", opt.Limit-peak, opt.Limit)
-	}
+	// The distance to EMFILE is appended from the same projection the JSON
+	// carries, so the sentence and the numbers cannot drift apart - and so that
+	// an unreadable limit is stated as unreadable instead of being silently
+	// omitted, which reads as "no risk".
+	v.Reason += "; " + proj.Describe()
 	v.Evidence = ev
 	return v, nil
 }
@@ -520,23 +559,6 @@ func confidenceFor(spanSeconds float64, opt LeakOptions) Confidence {
 		return ConfidenceMedium
 	}
 	return ConfidenceHigh
-}
-
-// timeToLimit estimates how many seconds until the descriptor limit is reached if
-// the observed rate holds. It returns 0 when no limit or no rate is known.
-//
-// This is a projection, not a prediction: the rate is an average over a short
-// window, and the honest claim is "at this rate", never "at this time".
-func timeToLimit(current, growth, samples, limit int) float64 {
-	if limit <= 0 || samples < 2 || growth <= 0 {
-		return 0
-	}
-	remaining := limit - current
-	if remaining <= 0 {
-		return 0
-	}
-	perSample := float64(growth) / float64(samples-1)
-	return float64(remaining) / perSample
 }
 
 // restingLevel is the descriptor count the process sat at before it grew: the
@@ -757,7 +779,7 @@ func Judge(tl *timeline.Timeline, opts LeakOptions) (LeakReport, error) {
 	// caller that forgot to pass it would silently lose the whole "constant count
 	// against a nearly full limit" rule, which is the only way a leak discovered after
 	// the fact can be confirmed at all.
-	if opt.Limit == 0 {
+	if opt.Limit.Unknown() {
 		opt.Limit = tl.Limit()
 	}
 
@@ -846,12 +868,19 @@ func Judge(tl *timeline.Timeline, opts LeakOptions) (LeakReport, error) {
 					"a constant count this large is a leak that filled the process before sampling began",
 					last, limit, (last*100)/limit)
 			}
+			// The projection survives the rewrite: the limit state it reports is
+			// a fact about the process, not about which criterion convicted it.
+			// The ETA is not carried, because a window with no rise in it has no
+			// rate to extrapolate - the rise is older than the observation.
+			proj := rep.Total.Projection
+			proj.Note = "the growth predates the window: no rate to project from"
 			rep.Total = LeakVerdict{
 				Fingerprint: "(total)",
 				Leak:        true,
 				Confidence:  ConfidenceLow,
 				Reason:      why,
 				Evidence:    rep.Total.Evidence,
+				Projection:  proj,
 			}
 		}
 	}
@@ -875,10 +904,18 @@ func samplingPeriod(taken []int64) time.Duration {
 }
 
 // downgrade caps a verdict's confidence at low, used when samples were evicted.
+//
+// The projection is capped too: its rate was fitted to a window whose beginning
+// is unknown, and an ETA quoted from a window that may have started mid-leak is
+// the same overstated claim the verdict just refused to make.
 func downgrade(v LeakVerdict) LeakVerdict {
 	switch v.Confidence {
 	case ConfidenceHigh, ConfidenceMedium:
 		v.Confidence = ConfidenceLow
+	}
+	switch v.Projection.Confidence {
+	case ConfidenceHigh, ConfidenceMedium:
+		v.Projection.Confidence = ConfidenceLow
 	}
 	return v
 }

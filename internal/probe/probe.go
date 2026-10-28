@@ -216,33 +216,82 @@ func readFDInfo(path string) (offset int64, flags uint64, err error) {
 	return offset, flags, scanner.Err()
 }
 
-// OpenLimit reads the soft limit on open files from /proc/<pid>/limits.
+// OpenLimit reads RLIMIT_NOFILE from /proc/<pid>/limits.
 //
-// It returns 0 when the limit cannot be read. Callers must treat 0 as
-// "unknown" and suppress headroom maths, never as "unlimited": the two lead to
-// opposite conclusions about risk.
-func (p *Probe) OpenLimit(pid int) int {
+// The three outcomes are kept apart. The kernel writes either a number or the
+// literal "unlimited" in each of the two columns, and the file may be missing or
+// unreadable - and folding that last case into 0 is how a report ends up
+// subtracting descriptors from a limit of zero and announcing an emergency.
+// Unknown is therefore its own state, never 0 and never unlimited.
+func (p *Probe) OpenLimit(pid int) model.OpenLimit {
 	f, err := os.Open(filepath.Join(p.procRoot(), strconv.Itoa(pid), "limits"))
 	if err != nil {
-		return 0
+		return model.UnknownLimit()
 	}
 	defer func() { _ = f.Close() }()
 
+	var b strings.Builder
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
-		fields := strings.Fields(scanner.Text())
+		b.WriteString(scanner.Text())
+		b.WriteByte('\n')
+	}
+	if err := scanner.Err(); err != nil {
+		// A partial read could stop before the line we need, and a limit we did
+		// not see is not a limit of zero.
+		return model.UnknownLimit()
+	}
+	return parseLimits(b.String())
+}
+
+// parseLimits extracts both RLIMIT_NOFILE columns from the text of a limits file.
+//
+// Split out from the file read so the parsing is testable without a process
+// whose ulimit was arranged for the occasion - the "unlimited" and "unreadable"
+// cases are otherwise very hard to reproduce on a machine running as root.
+func parseLimits(text string) model.OpenLimit {
+	for _, line := range strings.Split(text, "\n") {
 		// The line is: "Max open files            4096   1048576   files"
-		// Soft limit is the second numeric field when "open files" is present.
-		if len(fields) < 4 || !strings.Contains(strings.Join(fields[:3], " "), "Max open files") {
+		// Names are padded with spaces, so fields are the only reliable split.
+		if !strings.HasPrefix(line, "Max open files") {
 			continue
 		}
-		for _, field := range fields {
-			if n, convErr := strconv.Atoi(field); convErr == nil {
-				return n
-			}
+		fields := strings.Fields(line)
+		// "Max" "open" "files" <soft> <hard> <units>
+		if len(fields) < 5 {
+			return model.UnknownLimit()
 		}
+		soft, softState := parseLimitField(fields[3])
+		hard, hardState := parseLimitField(fields[4])
+		switch softState {
+		case model.LimitUnlimited:
+			return model.UnlimitedLimit()
+		case model.LimitKnown:
+			if hardState == model.LimitKnown {
+				return model.KnownLimitPair(soft, hard)
+			}
+			return model.KnownLimit(soft)
+		}
+		return model.UnknownLimit()
 	}
-	return 0
+	return model.UnknownLimit()
+}
+
+// parseLimitField reads one column: a number, "unlimited", or neither.
+func parseLimitField(field string) (int, model.LimitState) {
+	if field == "unlimited" {
+		return 0, model.LimitUnlimited
+	}
+	n, err := strconv.ParseInt(field, 10, 64)
+	if err != nil || n <= 0 {
+		return 0, model.LimitUnknown
+	}
+	// A limit beyond the address space of this build cannot be used in
+	// arithmetic; report it as unknown rather than wrapping to a negative.
+	if n > int64(^uint(0)>>1) {
+		return 0, model.LimitUnknown
+	}
+	return int(n), model.LimitKnown
 }
 
 // Exists reports whether pid currently has a /proc entry.

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/atop0914/fdscope/internal/model"
@@ -98,8 +99,14 @@ func TestSnapshotCountsAndSorts(t *testing.T) {
 	if !snap.Complete() {
 		t.Errorf("snapshot reported as incomplete, Unreadable=%d", snap.Unreadable)
 	}
-	if got, want := snap.OpenLimit, 4096; got != want {
-		t.Errorf("OpenLimit = %d, want %d", got, want)
+	if got, want := snap.OpenLimit.Soft, 4096; got != want {
+		t.Errorf("OpenLimit.Soft = %d, want %d", got, want)
+	}
+	if !snap.OpenLimit.Known() {
+		t.Errorf("OpenLimit state = %q, want known", snap.OpenLimit.State)
+	}
+	if got, want := snap.OpenLimit.Hard, 1048576; got != want {
+		t.Errorf("OpenLimit.Hard = %d, want the hard column %d", got, want)
 	}
 
 	// Ordering must be numeric, not lexicographic: fd 9 sorts after fd 7, and
@@ -186,18 +193,25 @@ func TestSnapshotInvalidPID(t *testing.T) {
 	}
 }
 
-func TestOpenLimitUnknownReturnsZero(t *testing.T) {
+func TestOpenLimitUnknownIsNotZero(t *testing.T) {
 	root := t.TempDir()
-	// No limits file at all: the limit must be reported as unknown (0), never
-	// as unlimited. "Unknown" and "unlimited" lead to opposite risk reads.
+	// No limits file at all: the limit must be reported as unknown, never as
+	// unlimited and never as a number. "Unknown" and "unlimited" lead to
+	// opposite risk reads, and 0 turns every headroom subtraction negative.
 	writeFakeProc(t, root, 11, map[string]string{"0": "/dev/null"})
 
 	snap, err := newTestProbe(root).Snapshot(11)
 	if err != nil {
 		t.Fatalf("Snapshot: %v", err)
 	}
-	if snap.OpenLimit != 0 {
-		t.Errorf("OpenLimit = %d, want 0 for unknown", snap.OpenLimit)
+	if !snap.OpenLimit.Unknown() {
+		t.Errorf("OpenLimit state = %q, want unknown", snap.OpenLimit.State)
+	}
+	if snap.OpenLimit.Unlimited() {
+		t.Error("a missing limits file was reported as unlimited")
+	}
+	if _, ok := snap.OpenLimit.Remaining(10); ok {
+		t.Error("Remaining reported a number for an unknown limit")
 	}
 }
 
@@ -211,8 +225,144 @@ func TestOpenLimitParsesSoftNotHard(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Snapshot: %v", err)
 	}
-	if snap.OpenLimit != 1024 {
-		t.Errorf("OpenLimit = %d, want soft limit 1024 (not the 1048576 hard limit)", snap.OpenLimit)
+	if got := snap.OpenLimit.Soft; got != 1024 {
+		t.Errorf("OpenLimit.Soft = %d, want soft limit 1024 (not the 1048576 hard limit)", got)
+	}
+	if got := snap.OpenLimit.Hard; got != 1048576 {
+		t.Errorf("OpenLimit.Hard = %d, want 1048576", got)
+	}
+}
+
+// TestParseLimitsThreeStates pins the three answers the kernel can give, using
+// the literal text of real /proc/<pid>/limits files.
+//
+// The "unlimited" case cannot be arranged on a normal machine - root can raise
+// RLIMIT_NOFILE but the container's hard limit is still a number - so the text
+// is the fixture. The states, not the plumbing, are what go wrong.
+func TestParseLimitsThreeStates(t *testing.T) {
+	cases := []struct {
+		name string
+		text string
+		want model.OpenLimit
+	}{
+		{
+			name: "finite",
+			text: "Limit                     Soft Limit           Hard Limit           Units\n" +
+				"Max open files            4096                 1048576              files\n",
+			want: model.KnownLimitPair(4096, 1048576),
+		},
+		{
+			name: "unlimited",
+			text: "Limit                     Soft Limit           Hard Limit           Units\n" +
+				"Max open files            unlimited            unlimited            files\n",
+			want: model.UnlimitedLimit(),
+		},
+		{
+			// The container's real shape: soft unlimited, hard a number. The
+			// soft column governs EMFILE, so this is unlimited for our purposes.
+			name: "soft unlimited with finite hard",
+			text: "Max open files            unlimited            1048576              files\n",
+			want: model.UnlimitedLimit(),
+		},
+		{
+			name: "soft numeric with unlimited hard",
+			text: "Max open files            1024                 unlimited            files\n",
+			want: model.KnownLimit(1024),
+		},
+		{
+			name: "no matching line",
+			text: "Max processes             100                  200                  processes\n",
+			want: model.UnknownLimit(),
+		},
+		{
+			name: "garbage",
+			text: "Max open files            lots                 lots                 files\n",
+			want: model.UnknownLimit(),
+		},
+		{
+			name: "empty",
+			text: "",
+			want: model.UnknownLimit(),
+		},
+		{
+			// A parse that yields 0 must not become "known 0": every headroom
+			// subtraction would come out negative and report an emergency.
+			name: "zero is not a known limit",
+			text: "Max open files            0                    0                    files\n",
+			want: model.UnknownLimit(),
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := parseLimits(tc.text)
+			if got.StateOrUnknown() != tc.want.StateOrUnknown() {
+				t.Fatalf("state = %q, want %q", got.StateOrUnknown(), tc.want.StateOrUnknown())
+			}
+			if got.Soft != tc.want.Soft {
+				t.Errorf("Soft = %d, want %d", got.Soft, tc.want.Soft)
+			}
+			if got.Hard != tc.want.Hard {
+				t.Errorf("Hard = %d, want %d", got.Hard, tc.want.Hard)
+			}
+		})
+	}
+}
+
+// TestSnapshotReportsUnlimitedLimit walks the unlimited state through the real
+// snapshot path, not just the parser.
+//
+// A live process with RLIMIT_NOFILE = unlimited cannot be arranged in this
+// container - `ulimit -Hn unlimited` is refused even as root - so the fixture is
+// a synthetic /proc tree. That is a limitation of the environment, not of the
+// code path: Snapshot reads the same file through the same parser either way.
+func TestSnapshotReportsUnlimitedLimit(t *testing.T) {
+	root := t.TempDir()
+	pidDir := writeFakeProc(t, root, 14, map[string]string{"0": "/dev/null"})
+	writeLimits(t, pidDir, "Limit                     Soft Limit           Hard Limit           Units\n"+
+		"Max open files            unlimited            unlimited            files     \n")
+
+	snap, err := newTestProbe(root).Snapshot(14)
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	if !snap.OpenLimit.Unlimited() {
+		t.Fatalf("OpenLimit state = %q, want unlimited", snap.OpenLimit.State)
+	}
+	if _, ok := snap.OpenLimit.Remaining(5); ok {
+		t.Error("an unlimited limit produced a remaining count")
+	}
+
+	h := model.NewHeadroom(14, snap.Len(), snap.OpenLimit)
+	if got := h.String(); !strings.Contains(got, "unlimited") {
+		t.Errorf("Headroom.String() = %q, want it to say unlimited", got)
+	}
+	if got := h.String(); strings.Contains(got, "remaining") {
+		t.Errorf("Headroom.String() = %q offered a remaining count for an unlimited limit", got)
+	}
+}
+
+// TestOpenLimitOfRealProcess reads the limit of this very process, which is the
+// one case a synthetic fixture cannot prove: the real file's column order.
+func TestOpenLimitOfRealProcess(t *testing.T) {
+	if !IsSupported() {
+		t.Skip("no Linux /proc available")
+	}
+	lim := NewProbe().OpenLimit(os.Getpid())
+	if lim.Unknown() {
+		t.Fatal("the limit of this process could not be read; /proc/<pid>/limits is always present on Linux")
+	}
+	if lim.Known() && lim.Soft <= 0 {
+		t.Errorf("known limit with Soft = %d", lim.Soft)
+	}
+	// The test binary's own open descriptors must fit under a finite limit;
+	// if the parser read the wrong column this is where it shows.
+	snap, err := NewProbe().Snapshot(os.Getpid())
+	if err != nil {
+		t.Fatalf("Snapshot(self): %v", err)
+	}
+	if left, ok := lim.Remaining(snap.Len()); ok && left <= 0 {
+		t.Errorf("this process is already past its own limit: %d open, limit %d", snap.Len(), lim.Soft)
 	}
 }
 
@@ -244,8 +394,8 @@ func TestSnapshotOfSelf(t *testing.T) {
 	if snap.Len() == 0 {
 		t.Fatal("live snapshot has zero descriptors, which is impossible for a running Go process")
 	}
-	if snap.OpenLimit == 0 {
-		t.Error("OpenLimit = 0 for a live process; ulimit is always set")
+	if snap.OpenLimit.Unknown() {
+		t.Error("OpenLimit is unknown for a live process; /proc/<pid>/limits is always readable for self")
 	}
 	// Every descriptor must carry a non-empty fingerprint, or grouping later
 	// would collapse everything into one bucket.

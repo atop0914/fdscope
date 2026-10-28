@@ -36,7 +36,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	h := fdscope.Headroom{PID: pid, Used: snap.Len(), Limit: snap.OpenLimit}
+	h := fdscope.NewHeadroom(pid, snap.Len(), snap.OpenLimit)
 	fmt.Printf("pid %d: %s\n", pid, h)
 
 	for _, row := range snap.SortedFingerprints() {
