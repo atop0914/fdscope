@@ -65,6 +65,10 @@ check:
   Defaults to 25 samples 200ms apart (a five second window). --min-growth,
   --min-growth-ratio, --min-rate and --min-window override the thresholds; the
   values actually applied are echoed in --json under "thresholds".
+
+  --attr-rules adds your own resource classes from a JSON rule file. The built-in
+  rules still apply and your rules win over them; a malformed file exits 1 rather
+  than judging under rules you did not choose.
 `
 
 // Run dispatches a subcommand. args excludes the program name.

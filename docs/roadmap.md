@@ -15,6 +15,7 @@
 | CLI `snapshot` | `internal/cli` | 表格 + `--json` + `--top` |
 | 公共库 `pkg/fdscope` | `pkg/fdscope` | 快照 API；`CheckPID` 判定；`LeakCheck` goleak 式断言 |
 | CLI `check` | `internal/cli/check.go` | 一次窗口一次结论，退出码 0/2/1（1 = 没能判定） |
+| L1 归因 | `internal/attr` | 指纹 → 类别规则（数据驱动 + `--attr-rules`）；泄漏按类别分摊增长 |
 | 跨平台可编译 + 非 Linux 明确拒绝 | `internal/probe/supported_*.go` | 不假装支持 |
 | CI（test/lint/零依赖闸门/交叉编译） | `.github/workflows/ci.yml` | golangci-lint v2.12.2 |
 
@@ -27,7 +28,7 @@
 | Day 4 | 泄漏判定：单调性 + 基线 + 速率 + 覆盖度，**含防误报语料**，`watch --judge` | done |
 | Day 5 | `check` 子命令 + 库级断言 API（`CheckPID` / `LeakCheck`） | done |
 | Day 6 | 上限余量与 `EMFILE` 预测 | done |
-| Day 7 | L1 归因：指纹 → 类型/路径规则 | todo |
+| Day 7 | L1 归因：指纹 → 类型/路径规则（`internal/attr` + `--attr-rules`） | done |
 | Day 8 | L2 归因：泄漏起始时刻 ↔ 进程内事件（标注相关性） | todo |
 | Day 9 | L3 归因：测试期 goroutine 配对 | todo |
 | Day 10 | 真实语料回归（含外部项目里的真 bug 复现） | todo |
@@ -44,6 +45,8 @@
 | ptrace / eBPF 追踪 `open()` 调用 | 需要特权，且在容器里常常不可用；会改变被测进程行为 |
 | 非 Linux 的平台兜底 | 空快照 = 静默通过，比不支持更危险（见 [design.md](design.md)） |
 | 猜测「是哪个函数打开的」 | `/proc` 没有这个信息；编造归因比不给归因更有害 |
+| L1 判「目录 fd」 | `readlink` 对目录与普通文件输出同形（实测），要区分只能 `stat`，而 `stat` 会依赖采样之外的世界状态 |
+| L1 判「已删除且可写」 | 可写性来自 `fdinfo` 的 flags，指纹里没有 |
 | 把相关性写成因果 | L2 归因始终标注为相关性 |
 | 图形界面 | 目标是 CI 与排障终端，`--json` 供上层消费 |
 

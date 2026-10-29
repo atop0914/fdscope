@@ -108,6 +108,7 @@ fdscope watch <pid> --judge --json --series   # + the totals the verdict used
 fdscope check <pid>                 # one window, one verdict: the CI gate
 fdscope check <pid> --json          # + the series and the thresholds applied
 fdscope check <pid> --min-growth 50 --min-rate 1   # for a large process
+fdscope check <pid> --attr-rules rules.json        # + your own resource classes
 ```
 
 `watch` answers the question neither of the others can: **is it rising and
@@ -177,6 +178,47 @@ Exit codes: `0` no leak, `2` leak, `1` the run itself failed. `2` is what CI
 branches on. `--series` adds the per-sample totals, which is what makes a
 verdict reproducible offline rather than an opinion about a run nobody can
 re-examine.
+
+### Attribution: which *class* of resource is growing
+
+A verdict names fingerprints, and twenty fingerprints is not an answer to "what
+is leaking". Every leaked series is labelled with the class its fingerprint
+already proves — and the leak is summed up by class, with the share of the growth
+each one accounts for:
+
+```console
+$ fdscope check 4242 --json | jq '.attribution'   # rows trimmed to fit here
+[
+  { "category": "log file", "rule": "log-file", "matched": true,
+    "confidence": "high", "growth": 38, "fingerprints": 1, "coverage": 0.5 },
+  { "category": "socket", "rule": "socket", "matched": true,
+    "confidence": "high", "growth": 38, "fingerprints": 1, "coverage": 0.5 }
+]
+```
+
+The same run in the table prints one line per leaked series
+(`attribution: log file [log-file, L1 high]` plus the evidence sentence) and
+closes with the breakdown above.
+
+This is **L1 attribution**: it restates the fingerprint and stops there. `/proc`
+does not record who opened a descriptor, so no L1 sentence may say "opened by",
+and a class that no rule covers is reported as `no rule matched` with its share
+of the growth rather than left blank — an unexplained quarter of a leak is the
+part a reader most needs to see.
+
+Configured rules add your own classes on top of the built-in ones, and win over
+them:
+
+```console
+$ fdscope check 4242 --attr-rules rules.json
+```
+
+A rule file is strictly parsed: unknown fields, unknown kinds, a rule with no
+predicate, an empty rule list — each is an error naming the line it is on.
+Sitting on a typo would turn "I added a rule and nothing changed" into a mystery.
+See [docs/attr.md](docs/attr.md) for the built-in rule table, why the specificity
+ladder is ordered as it is, and the two rules deliberately not implemented
+(directory descriptors and open flags are not in the fingerprint).
 
 Three things it deliberately refuses to do:
 
@@ -357,7 +399,9 @@ trusted:
 - **Read-only, unprivileged.** It reads `/proc` and never `ptrace`s. Sampling a
   process must not change the process.
 - **No invented attribution.** `/proc` does not record who opened a descriptor.
-  fdscope reports what it can prove and marks the rest as correlation.
+  fdscope reports what it can prove and marks the rest as correlation: L1 names
+  the *class* of a resource (restating the fingerprint), L2 and L3 may only
+  report correlation and must say so in the output.
 - **Partial snapshots are labelled.** A descriptor that cannot be resolved
   increments `Unreadable`; the total is then reported as a lower bound rather
   than a fact.
@@ -368,11 +412,13 @@ trusted:
 |----------|--------------|
 | [docs/design.md](docs/design.md) | you want the reasoning behind fingerprints and the limits of `/proc` |
 | [docs/proc.md](docs/proc.md) | you need to know exactly which `/proc` fields are used and what they mean |
+| [docs/attr.md](docs/attr.md) | you want the attribution rule table, the specificity ladder, or the two rules deliberately not implemented |
 | [docs/roadmap.md](docs/roadmap.md) | you want to know what is deliberately not built yet |
 
 ## Status
 
-Day 5 of 12. `snapshot`, `diff`, `watch`, `watch --judge` and `check` are working,
-and the verdict is reachable as a library (`CheckPID`, `LeakCheck`). Attribution
-(L1/L2/L3) and the EMFILE projection are not built yet. See the roadmap for the
-exact boundary — this file does not claim features that do not exist.
+Day 7 of 12. `snapshot`, `diff`, `watch`, `watch --judge`, `check`, the EMFILE
+projection and L1 attribution are working, and the verdict is reachable as a
+library (`CheckPID`, `LeakCheck`). L2 (timing correlation) and L3 (test-time
+goroutine pairing) are not built yet. See the roadmap for the exact boundary —
+this file does not claim features that do not exist.

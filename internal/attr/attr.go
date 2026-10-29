@@ -221,9 +221,9 @@ func New(extra []Rule) (*Engine, error) {
 		}
 		all = append(all, r)
 	}
-	for _, r := range builtinRules {
-		all = append(all, r)
-	}
+	// Extra rules come first, so that a stable sort by priority leaves them ahead
+	// of a built-in rule of the same priority.
+	all = append(all, builtinRules...)
 	// Duplicate names are rejected rather than tolerated: two rules with one
 	// name make "rule: x matched" ambiguous in the report, and the reader has no
 	// way to tell which of them ran.
