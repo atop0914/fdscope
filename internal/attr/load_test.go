@@ -216,3 +216,36 @@ func TestLoadFile(t *testing.T) {
 		t.Errorf("error = %q, want it to name the file", err)
 	}
 }
+
+// TestLoadEngine covers the single entry point. An empty path must mean "built-in
+// rules", not "no rules": the distinction matters because a nil engine silently
+// degrades to the same thing, and a caller that passed an empty path by accident
+// should get working behaviour rather than a report where nothing is attributed.
+func TestLoadEngine(t *testing.T) {
+	engine, err := LoadEngine("")
+	if err != nil {
+		t.Fatalf("LoadEngine(\"\"): %v", err)
+	}
+	if got := engine.Attribute("socket").Category; got != "socket" {
+		t.Errorf("built-in engine category = %q, want socket", got)
+	}
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "rules.json")
+	if writeErr := os.WriteFile(path, []byte(validRules), 0o600); writeErr != nil {
+		t.Fatal(writeErr)
+	}
+	engine, err = LoadEngine(path)
+	if err != nil {
+		t.Fatalf("LoadEngine(%q): %v", path, err)
+	}
+	if got := engine.Attribute("file:/srv/app/shards/0002.db").Category; got != "shard file" {
+		t.Errorf("category = %q, want shard file", got)
+	}
+	// The built-ins survive the merge: a rule file adds categories, it does not
+	// replace the set. Otherwise loading one rule would silently blind the tool to
+	// sockets.
+	if got := engine.Attribute("socket").Category; got != "socket" {
+		t.Errorf("after merging a rule file, socket = %q; the built-ins must still apply", got)
+	}
+}

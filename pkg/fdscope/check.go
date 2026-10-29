@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/atop0914/fdscope/internal/analyze"
+	"github.com/atop0914/fdscope/internal/attr"
 	"github.com/atop0914/fdscope/internal/model"
 	"github.com/atop0914/fdscope/internal/probe"
 )
@@ -32,6 +33,12 @@ type (
 	LeakEvidence = analyze.LeakEvidence
 	// Confidence states how much a verdict deserves to be believed.
 	Confidence = analyze.Confidence
+	// Attribution is the resource class of one leaked series.
+	Attribution = attr.Attribution
+	// CategoryAttribution is one row of the leak breakdown.
+	CategoryAttribution = attr.CategoryAttribution
+	// AttrEngine is the attribution rule set an embedder may configure.
+	AttrEngine = attr.Engine
 )
 
 // Confidence levels reported by fdscope.
@@ -44,6 +51,13 @@ const (
 
 // DefaultLeakOptions returns the thresholds used when the caller configures none.
 func DefaultLeakOptions() LeakOptions { return analyze.DefaultLeakOptions() }
+
+// LoadAttrEngine builds the attribution rule set, reading a JSON rule file when
+// path is not empty. An empty path means the built-in rules.
+func LoadAttrEngine(path string) (*AttrEngine, error) { return attr.LoadEngine(path) }
+
+// NoMatchCategory is the category reported for a fingerprint no rule covers.
+const NoMatchCategory = attr.NoMatchCategory
 
 // supported is the platform gate, held in a variable so that the refusal on
 // non-Linux platforms can be exercised from a test running on Linux. Without

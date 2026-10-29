@@ -36,6 +36,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/atop0914/fdscope/internal/attr"
 	"github.com/atop0914/fdscope/internal/model"
 	"github.com/atop0914/fdscope/internal/timeline"
 )
@@ -79,6 +80,11 @@ type LeakVerdict struct {
 	// an opinion; a reader must be able to see which threshold was crossed and
 	// by how much, and a test must be able to assert on it.
 	Evidence LeakEvidence `json:"evidence"`
+	// Attribution says which class of resource this is. It is nil unless the
+	// series was judged a leak: explaining a resource that is not growing would
+	// fill the report with rows nobody asked about and bury the ones that matter.
+	// The process total never carries one - it is not a resource.
+	Attribution *attr.Attribution `json:"attribution,omitempty"`
 }
 
 // LeakEvidence records what each criterion measured.
@@ -170,6 +176,9 @@ type LeakOptions struct {
 	MinWindowMillis int64
 	// MinSamples is the shortest series that can be judged at all.
 	MinSamples int
+	// Attr is the attribution engine. Nil means the built-in rules; a configured
+	// engine adds the caller's own categories on top of them.
+	Attr *attr.Engine
 	// Limit is the descriptor limit of the process. It is used for the headroom
 	// figure and the EMFILE projection, never for the verdict: a leak is a leak
 	// whether or not the process is close to EMFILE. The zero value means
@@ -728,6 +737,14 @@ type LeakReport struct {
 	// fingerprint that could be blamed.
 	Total  LeakVerdict   `json:"total"`
 	Series []LeakVerdict `json:"series"`
+	// Attribution is the breakdown of the leak by resource class, largest share
+	// first. It is empty when nothing leaked: there is no growth to divide up.
+	//
+	// The rows are aggregated because twenty fingerprints is not an answer to
+	// "what is leaking", while five categories with shares is. The per-series
+	// verdicts keep their own attribution for the reader who wants the
+	// individual resources.
+	Attribution []attr.CategoryAttribution `json:"attribution,omitempty"`
 }
 
 // Leaks returns the series verdicts that found a leak, largest growth first.
@@ -885,8 +902,38 @@ func Judge(tl *timeline.Timeline, opts LeakOptions) (LeakReport, error) {
 		}
 	}
 
+	attachAttribution(&rep, opt.Attr)
+
 	rep.Leaking = rep.Total.Leak || len(rep.Leaks()) > 0
 	return rep, nil
+}
+
+// attachAttribution labels every leaked series and sums them up by category.
+//
+// It runs at the end, over the verdicts as they will be reported, for one reason:
+// the verdicts are what a reader sees, and attributing anything else would let the
+// table and the breakdown disagree about which resources leaked.
+//
+// Only series are attributed. The process total is not a resource - it is the sum
+// of one - so naming its class would be inventing a category for an arithmetic
+// artefact.
+func attachAttribution(rep *LeakReport, engine *attr.Engine) {
+	if engine == nil {
+		engine = attr.Default()
+	}
+	items := make([]attr.Item, 0, len(rep.Series))
+	for i := range rep.Series {
+		if !rep.Series[i].Leak {
+			continue
+		}
+		a := engine.Attribute(rep.Series[i].Fingerprint)
+		rep.Series[i].Attribution = &a
+		items = append(items, attr.Item{
+			Fingerprint: rep.Series[i].Fingerprint,
+			Growth:      rep.Series[i].Evidence.Growth,
+		})
+	}
+	rep.Attribution = attr.Summarize(engine, items)
 }
 
 // samplingPeriod is the mean interval between consecutive samples.

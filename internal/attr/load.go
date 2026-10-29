@@ -71,6 +71,22 @@ var emitKinds = map[string]model.FDKind{
 	"anon_inode": model.KindAnonInode,
 }
 
+// LoadEngine builds an engine, reading user rules from path when one is given.
+//
+// One entry point for both callers, because the two steps have to happen in one
+// order: load, then merge over the built-ins. A caller that did the second without
+// the first would run with the built-ins only while believing its file was in use.
+func LoadEngine(path string) (*Engine, error) {
+	if path == "" {
+		return Default(), nil
+	}
+	rules, err := LoadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	return New(rules)
+}
+
 // LoadFile reads and compiles a rule file.
 func LoadFile(path string) ([]Rule, error) {
 	data, err := os.ReadFile(path)
