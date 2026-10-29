@@ -226,6 +226,65 @@ func splitFingerprint(s string) (payload string, prefix string, ok bool) {
 	return "", "", false
 }
 
+// FingerprintInfo is the machine-readable decomposition of a fingerprint.
+//
+// It exists so that a layer which may only look at fingerprints - the L1
+// attribution engine - can read the parts (scheme, path, kind, unlinked) without
+// re-implementing the parsing rules. A second parser would drift from this one,
+// and the drift would be invisible: two readers of the same string disagreeing
+// about what it means is not an error anywhere, it just yields two answers.
+type FingerprintInfo struct {
+	// Scheme is the fingerprint namespace without its colon: "file", "deleted",
+	// "socket", "pipe" or "anon_inode". It is empty for a bare device path,
+	// because devices keep their raw target as the fingerprint (see Fingerprint):
+	// "/dev/null" needs no normalisation, and prefixing it would suggest a file.
+	Scheme string
+	// Payload is what follows the scheme: the normalised path for a file, the
+	// anon_inode name for an anonymous inode, and empty for socket and pipe.
+	Payload string
+	// Kind is the kind the fingerprint asserts, derived from the scheme rather
+	// than re-derived from the payload. See fingerprintKind for why.
+	Kind FDKind
+	// Deleted reports that the descriptor was unlinked while still held.
+	Deleted bool
+}
+
+// Path returns the filesystem path the fingerprint names, or "" when it names
+// something that has no path (a socket, a pipe, an anonymous inode).
+//
+// It is a normalised path, not a verified one: the file may be gone, and the path
+// may live in a mount namespace this process cannot see. A caller that stats it
+// is asking a different question from the one the fingerprint answers.
+func (i FingerprintInfo) Path() string {
+	if i.Scheme == "file" || i.Scheme == "deleted" || i.Scheme == "" {
+		return i.Payload
+	}
+	return ""
+}
+
+// DecomposeFingerprint splits fp into the parts it is built from.
+//
+// The second result is false when fp is not a fingerprint this package emits.
+// That is not an error state to be papered over: a caller that cannot decompose a
+// value must say so rather than guess a kind, because a guessed kind is what a
+// false attribution is made of.
+func DecomposeFingerprint(fp string) (FingerprintInfo, bool) {
+	if payload, prefix, ok := splitFingerprint(fp); ok {
+		return FingerprintInfo{
+			Scheme:  strings.TrimSuffix(prefix, ":"),
+			Payload: payload,
+			Kind:    fingerprintKind(prefix, payload),
+			Deleted: prefix == "deleted:",
+		}, true
+	}
+	// A bare rooted path is the one form emitted without a scheme: devices.
+	// Anything else here (an arbitrary word, an empty string) is not ours.
+	if strings.HasPrefix(fp, "/") {
+		return FingerprintInfo{Payload: fp, Kind: TargetKind(fp)}, true
+	}
+	return FingerprintInfo{}, false
+}
+
 // fingerprintKind maps a fingerprint scheme prefix back to its descriptor kind.
 //
 // It exists because the prefix is the authoritative statement of what the

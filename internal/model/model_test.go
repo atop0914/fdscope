@@ -334,3 +334,134 @@ func TestSnapshotGrouping(t *testing.T) {
 		t.Errorf("CountByKind = %v", byKind)
 	}
 }
+
+// TestDecomposeFingerprint covers every form Fingerprint emits, because a form
+// this function cannot decompose is a form no attribution rule can ever see. The
+// bare device path is the easy one to forget: devices are emitted without a
+// scheme, so a decomposer that only knows the prefixed forms would silently
+// return "not a fingerprint" for "/dev/null" - the one resource a reader is most
+// likely to check by hand.
+func TestDecomposeFingerprint(t *testing.T) {
+	cases := []struct {
+		fp      string
+		want    FingerprintInfo
+		wantOK  bool
+		comment string
+	}{
+		{
+			fp:      "file:/var/log/app.log",
+			want:    FingerprintInfo{Scheme: "file", Payload: "/var/log/app.log", Kind: KindFile},
+			wantOK:  true,
+			comment: "a live file keeps its path",
+		},
+		{
+			fp:      "deleted:/tmp/ghost",
+			want:    FingerprintInfo{Scheme: "deleted", Payload: "/tmp/ghost", Kind: KindDeleted, Deleted: true},
+			wantOK:  true,
+			comment: "the deleted scheme is what makes Deleted true",
+		},
+		{
+			fp:      "socket",
+			want:    FingerprintInfo{Scheme: "socket", Kind: KindSocket},
+			wantOK:  true,
+			comment: "sockets carry no payload: the inode is not identity",
+		},
+		{
+			fp:      "pipe",
+			want:    FingerprintInfo{Scheme: "pipe", Kind: KindPipe},
+			wantOK:  true,
+			comment: "pipes likewise",
+		},
+		{
+			fp:      "anon_inode:eventpoll",
+			want:    FingerprintInfo{Scheme: "anon_inode", Payload: "eventpoll", Kind: KindAnonInode},
+			wantOK:  true,
+			comment: "the anon_inode name is the only thing /proc names",
+		},
+		{
+			fp:      "/dev/null",
+			want:    FingerprintInfo{Payload: "/dev/null", Kind: KindDevice},
+			wantOK:  true,
+			comment: "devices are emitted as their raw path, with no scheme",
+		},
+		{
+			fp:      "file:~/notes.txt",
+			want:    FingerprintInfo{Scheme: "file", Payload: "~/notes.txt", Kind: KindFile},
+			wantOK:  true,
+			comment: "an anonymised home is still a path",
+		},
+		{
+			fp:      "(total)",
+			wantOK:  false,
+			comment: "the process total is not a resource and must not be attributed",
+		},
+		{
+			fp:      "eventpoll",
+			wantOK:  false,
+			comment: "a bare word is not a fingerprint, however much it looks like one",
+		},
+		{
+			fp:      "",
+			wantOK:  false,
+			comment: "the empty string must not decompose into an empty kind",
+		},
+	}
+	for _, tc := range cases {
+		got, ok := DecomposeFingerprint(tc.fp)
+		if ok != tc.wantOK {
+			t.Errorf("DecomposeFingerprint(%q) ok = %t, want %t (%s)", tc.fp, ok, tc.wantOK, tc.comment)
+			continue
+		}
+		if !ok {
+			continue
+		}
+		if got != tc.want {
+			t.Errorf("DecomposeFingerprint(%q) = %+v, want %+v (%s)", tc.fp, got, tc.want, tc.comment)
+		}
+	}
+}
+
+// TestDecomposeFingerprintAgreesWithFingerprint states the invariant the
+// attribution engine depends on: whatever Fingerprint emits must decompose back
+// to the same kind and the same path. A violation would let a resource be judged
+// as one kind and attributed as another, and nothing else in the code base
+// compares the two.
+func TestDecomposeFingerprintAgreesWithFingerprint(t *testing.T) {
+	n := DefaultNormalizer()
+	targets := []string{
+		"/var/log/app.log",
+		"/tmp/worker",
+		"/dev/null",
+		"/dev/pts/0",
+		"/dev/shm/seg",
+		"/home/u/data.bin",
+		"/var/log/app.log.2026-10-22",
+		"/tmp/ghost (deleted)",
+		"socket:[12345]",
+		"pipe:[6789]",
+		"anon_inode:[eventpoll]",
+		"anon_inode:inotify",
+	}
+	for _, target := range targets {
+		fp, kind := n.Fingerprint(target)
+		info, ok := DecomposeFingerprint(fp)
+		if !ok {
+			t.Fatalf("Fingerprint(%q) produced %q, which does not decompose", target, fp)
+		}
+		if info.Kind != kind {
+			t.Errorf("Fingerprint(%q) = %q kind %q, but DecomposeFingerprint says %q",
+				target, fp, kind, info.Kind)
+		}
+		// Path must be empty exactly for the kinds that have no path.
+		switch kind {
+		case KindSocket, KindPipe, KindAnonInode:
+			if info.Path() != "" {
+				t.Errorf("Fingerprint(%q) kind %q reports path %q", target, kind, info.Path())
+			}
+		default:
+			if info.Path() == "" {
+				t.Errorf("Fingerprint(%q) kind %q reports no path", target, kind)
+			}
+		}
+	}
+}
