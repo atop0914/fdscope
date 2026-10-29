@@ -48,6 +48,7 @@ func runCheck(args []string, stdout, stderr io.Writer) error {
 
 	keepDir := fs.Bool("keep-dir", true, "keep directory components in fingerprints")
 	stripRotation := fs.Bool("strip-rotation", true, "merge rotated log files into one fingerprint")
+	attrRules := fs.String("attr-rules", "", "JSON file of attribution rules to add to the built-in ones")
 
 	args, positionals := splitFlags(args, fs)
 	if err := fs.Parse(args); err != nil {
@@ -94,6 +95,15 @@ func runCheck(args []string, stdout, stderr io.Writer) error {
 		leak.MinWindowMillis = int64(*minWindow / time.Millisecond)
 	}
 
+	// The rule file is read before sampling starts, and a bad one ends the run
+	// here. Reading it later would mean spending a five second window and then
+	// failing - or, worse, reporting with rules the operator thinks are in effect
+	// but are not.
+	engine, err := fdscope.LoadAttrEngine(*attrRules)
+	if err != nil {
+		return err
+	}
+
 	n := fdscope.NewNormalizer()
 	if home, homeErr := os.UserHomeDir(); homeErr == nil {
 		n.HomeDir = home
@@ -105,6 +115,7 @@ func runCheck(args []string, stdout, stderr io.Writer) error {
 	opts.Interval = *interval
 	opts.Samples = *samples
 	opts.Leak = leak
+	opts.Leak.Attr = engine
 	opts.Normalizer = &n
 
 	res, err := fdscope.CheckPID(pid, opts)
@@ -170,8 +181,13 @@ type checkReport struct {
 	// computation that could disagree with it.
 	Headroom   fdscope.Headroom   `json:"headroom"`
 	Projection fdscope.Projection `json:"projection"`
-	Verdict    fdscope.LeakReport `json:"verdict"`
-	Summary    string             `json:"summary"`
+	// Attribution is the leak breakdown, hoisted from verdict.attribution for the
+	// same reason as Headroom and Projection: a CI job reading one field should
+	// not have to know that the process total is not a resource. It is a copy of
+	// the verdict's rows, not a second computation that could disagree with them.
+	Attribution []fdscope.CategoryAttribution `json:"attribution,omitempty"`
+	Verdict     fdscope.LeakReport            `json:"verdict"`
+	Summary     string                        `json:"summary"`
 }
 
 func buildCheckReport(res fdscope.CheckResult, leak fdscope.LeakOptions) checkReport {
@@ -189,11 +205,12 @@ func buildCheckReport(res fdscope.CheckResult, leak fdscope.LeakOptions) checkRe
 			MinSamples:       leak.MinSamples,
 			Warmup:           leak.Warmup,
 		},
-		Totals:     res.Totals,
-		Headroom:   res.Headroom,
-		Projection: res.Report.Total.Projection,
-		Verdict:    res.Report,
-		Summary:    fdscope.Summarize(res.Report),
+		Totals:      res.Totals,
+		Headroom:    res.Headroom,
+		Projection:  res.Report.Total.Projection,
+		Attribution: res.Report.Attribution,
+		Verdict:     res.Report,
+		Summary:     fdscope.Summarize(res.Report),
 	}
 }
 

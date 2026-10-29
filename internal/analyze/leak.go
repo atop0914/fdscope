@@ -902,36 +902,63 @@ func Judge(tl *timeline.Timeline, opts LeakOptions) (LeakReport, error) {
 		}
 	}
 
-	attachAttribution(&rep, opt.Attr)
-
 	rep.Leaking = rep.Total.Leak || len(rep.Leaks()) > 0
+	attachAttribution(&rep, tl, opt.Attr)
 	return rep, nil
 }
 
-// attachAttribution labels every leaked series and sums them up by category.
+// attachAttribution labels the leaked series and partitions the growth by category.
 //
-// It runs at the end, over the verdicts as they will be reported, for one reason:
-// the verdicts are what a reader sees, and attributing anything else would let the
-// table and the breakdown disagree about which resources leaked.
+// Two different questions, answered separately on purpose:
 //
-// Only series are attributed. The process total is not a resource - it is the sum
-// of one - so naming its class would be inventing a category for an arithmetic
+//	per series   "what class is this resource?" - only for the series judged a
+//	             leak. A series that did not leak has no explanation to give, and
+//	             labelling it would fill the report with rows nobody asked about.
+//	breakdown    "where did the descriptors go?" - over every series whose count
+//	             rose during the window, weighted by how much it rose, reported
+//	             only when the process was judged to be leaking at all.
+//
+// The breakdown deliberately does not require each series to clear the leak
+// floors. The most common real shape is a hundred distinct paths gaining one
+// descriptor each: the process total leaks, every series is a pulse of one, and
+// "which series leaked" has no answer - while the question the operator asked,
+// "what kind of resource is growing", has a precise one. Requiring per-series
+// conviction would report nothing for exactly that shape.
+//
+// The process total is never attributed: it is the sum of the series, not a
+// resource, and naming its class would be inventing a category for an arithmetic
 // artefact.
-func attachAttribution(rep *LeakReport, engine *attr.Engine) {
+//
+// Coverage therefore partitions growth, not blame. A pool that filled legitimately
+// inside a leaking process still owns its share, and the per-series verdicts above
+// are what say which individual resources actually leaked.
+func attachAttribution(rep *LeakReport, tl *timeline.Timeline, engine *attr.Engine) {
 	if engine == nil {
 		engine = attr.Default()
 	}
-	items := make([]attr.Item, 0, len(rep.Series))
 	for i := range rep.Series {
 		if !rep.Series[i].Leak {
 			continue
 		}
 		a := engine.Attribute(rep.Series[i].Fingerprint)
 		rep.Series[i].Attribution = &a
-		items = append(items, attr.Item{
-			Fingerprint: rep.Series[i].Fingerprint,
-			Growth:      rep.Series[i].Evidence.Growth,
-		})
+	}
+	if !rep.Leaking || tl == nil {
+		return
+	}
+	items := make([]attr.Item, 0, len(rep.Series))
+	for _, fp := range tl.Fingerprints() {
+		counts := tl.FingerprintSeries(fp).Counts
+		if len(counts) < 2 {
+			continue
+		}
+		// Net rise over the retained window. It is the same quantity the process
+		// total's own rise is the sum of, so the shares add up to the growth a
+		// reader can see in the totals line rather than to a second, private
+		// definition of growth.
+		if rise := counts[len(counts)-1] - counts[0]; rise > 0 {
+			items = append(items, attr.Item{Fingerprint: fp, Growth: rise})
+		}
 	}
 	rep.Attribution = attr.Summarize(engine, items)
 }

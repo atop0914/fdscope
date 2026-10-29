@@ -90,22 +90,36 @@ func TestJudgeAttributesLeakedSeries(t *testing.T) {
 	if len(rep.Attribution) != 2 {
 		t.Fatalf("got %d breakdown rows, want 2: %+v", len(rep.Attribution), rep.Attribution)
 	}
-	// The shares are recomputed from the verdicts' own growth numbers, so a
-	// breakdown computed over a different quantity fails here instead of looking
-	// plausible.
-	total := float64(logV.Evidence.Growth + sockV.Evidence.Growth)
+	// The breakdown must partition the same growth the totals line reports. That is
+	// the property, not a nice-to-have: a breakdown computed over a second, private
+	// definition of growth (per-series verdict growth, say) produces shares that
+	// look plausible and do not add up to what the reader can see.
+	totals := tl.TotalSeries().Counts
+	totalRise := totals[len(totals)-1] - totals[0]
+	sumGrowth := 0
 	for _, row := range rep.Attribution {
+		sumGrowth += row.Growth
+	}
+	if sumGrowth != totalRise {
+		t.Errorf("breakdown accounts for %d descriptors of growth, but the process total rose %d: %+v",
+			sumGrowth, totalRise, rep.Attribution)
+	}
+
+	// Coverage is each category's share of that growth: the fixture rises 40 on the
+	// log file and 20 on sockets, so two thirds and one third.
+	for _, row := range rep.Attribution {
+		var want float64
 		switch row.Category {
 		case "log file":
-			if want := float64(logV.Evidence.Growth) / total; math.Abs(row.Coverage-want) > 1e-9 {
-				t.Errorf("log coverage = %v, want %v (growth %d of %v)", row.Coverage, want, logV.Evidence.Growth, total)
-			}
+			want = 40.0 / 60.0
 		case "socket":
-			if want := float64(sockV.Evidence.Growth) / total; math.Abs(row.Coverage-want) > 1e-9 {
-				t.Errorf("socket coverage = %v, want %v", row.Coverage, want)
-			}
+			want = 20.0 / 60.0
 		default:
 			t.Errorf("unexpected category %q in the breakdown", row.Category)
+			continue
+		}
+		if math.Abs(row.Coverage-want) > 1e-9 {
+			t.Errorf("%s coverage = %v, want %v", row.Category, row.Coverage, want)
 		}
 	}
 	var sum float64

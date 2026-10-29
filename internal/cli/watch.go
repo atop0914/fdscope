@@ -8,13 +8,13 @@ import (
 	"io"
 	"os"
 	"strconv"
-	"strings"
 	"text/tabwriter"
 	"time"
 
 	"github.com/atop0914/fdscope/internal/analyze"
 	"github.com/atop0914/fdscope/internal/model"
 	"github.com/atop0914/fdscope/internal/probe"
+	fdscope "github.com/atop0914/fdscope/pkg/fdscope"
 )
 
 // runWatch samples a process repeatedly and reports the shape of each series.
@@ -37,6 +37,7 @@ func runWatch(args []string, stdout, stderr io.Writer) error {
 	stripRotation := fs.Bool("strip-rotation", true, "merge rotated log files into one fingerprint")
 	judge := fs.Bool("judge", false, "also decide whether the series is a leak, and exit 2 if it is")
 	withSeries := fs.Bool("series", false, "include the per-sample descriptor totals in the JSON output")
+	attrRules := fs.String("attr-rules", "", "JSON file of attribution rules to add to the built-in ones")
 
 	args, positionals := splitFlags(args, fs)
 	if err := fs.Parse(args); err != nil {
@@ -150,7 +151,16 @@ func runWatch(args []string, stdout, stderr io.Writer) error {
 	// ignore the word.
 	leaking := false
 	if *judge {
-		lr, judgeErr := analyze.Judge(res.Timeline, analyze.DefaultLeakOptions())
+		// The rules are loaded before the judgement and a broken file ends the run
+		// with an error: judging under rules the operator did not choose, without
+		// saying so, is the failure this flag exists to avoid.
+		engine, engineErr := fdscope.LoadAttrEngine(*attrRules)
+		if engineErr != nil {
+			return engineErr
+		}
+		judgeOpts := analyze.DefaultLeakOptions()
+		judgeOpts.Attr = engine
+		lr, judgeErr := analyze.Judge(res.Timeline, judgeOpts)
 		if judgeErr != nil {
 			return judgeErr
 		}
@@ -382,17 +392,13 @@ func reboundWord(s analyze.Summary) string {
 // put "deleted" beside a live path, which is the self-contradicting output this
 // project has already had to fix once.
 func fingerprintKindLabel(fp string) model.FDKind {
-	switch {
-	case strings.HasPrefix(fp, "deleted:"):
-		return model.KindDeleted
-	case strings.HasPrefix(fp, "file:"):
-		return model.KindFile
-	case fp == "socket":
-		return model.KindSocket
-	case fp == "pipe":
-		return model.KindPipe
-	case strings.HasPrefix(fp, "anon_inode:"):
-		return model.KindAnonInode
+	// Delegated to the model rather than re-derived here, because the hand-rolled
+	// version disagreed with it: devices keep their raw path as a fingerprint, so
+	// "/dev/null" fell through every prefix case and the table printed "unknown"
+	// for a descriptor whose kind was never in doubt. Two parsers of one format is
+	// how the report and the verdict start describing different things.
+	if info, ok := model.DecomposeFingerprint(fp); ok {
+		return info.Kind
 	}
 	return model.KindUnknown
 }

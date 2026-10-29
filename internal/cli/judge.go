@@ -7,6 +7,7 @@ import (
 	"text/tabwriter"
 
 	"github.com/atop0914/fdscope/internal/analyze"
+	"github.com/atop0914/fdscope/internal/attr"
 	"github.com/atop0914/fdscope/internal/probe"
 	fdscope "github.com/atop0914/fdscope/pkg/fdscope"
 )
@@ -88,7 +89,38 @@ func renderJudgeTable(w io.Writer, rep analyze.LeakReport) error {
 			return err
 		}
 	}
-	return nil
+	return renderBreakdown(w, rep.Attribution)
+}
+
+// renderBreakdown prints the leak grouped by resource class.
+//
+// The per-resource blocks above answer "which fingerprint", and twenty of them is
+// not an answer to "what is leaking". This block is the answer to the question the
+// operator actually asked, and the share next to each row is what keeps a partial
+// answer from reading as a complete one.
+func renderBreakdown(w io.Writer, rows []attr.CategoryAttribution) error {
+	if len(rows) == 0 {
+		return nil
+	}
+	if _, err := fmt.Fprint(w, "\nattribution: share of the leak by resource class\n"); err != nil {
+		return err
+	}
+	tw := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
+	for _, row := range rows {
+		// The percentage is rounded, so a 0.4% share would print as "0%" and read as
+		// nothing. It is printed as "<1%" instead: a category that exists must never
+		// render as an absent one.
+		share := fmt.Sprintf("%.0f%%", row.Coverage*100)
+		if row.Coverage > 0 && row.Coverage < 0.005 {
+			share = "<1%"
+		}
+		if _, err := fmt.Fprintf(tw, "  %s\t%s\tgrowth %d over %d resource(s)\n",
+			share, attributionHeadline(row.Category, row.Rule, row.Matched, row.Confidence),
+			row.Growth, row.Fingerprints); err != nil {
+			return err
+		}
+	}
+	return tw.Flush()
 }
 
 // renderVerdict prints one verdict and its evidence.
@@ -106,6 +138,15 @@ func renderVerdict(w io.Writer, v analyze.LeakVerdict, total bool) error {
 	}
 	if v.Reason != "" {
 		if _, err := fmt.Fprintf(w, "  reason: %s\n", v.Reason); err != nil {
+			return err
+		}
+	}
+	// The class and its evidence are printed next to the verdict, not only in the
+	// JSON: "log files are leaking" is the sentence an operator acts on, and it is
+	// worthless if it takes a jq query to find it.
+	if a := v.Attribution; a != nil {
+		if _, err := fmt.Fprintf(w, "  attribution: %s\n  because: %s\n",
+			attributionHeadline(a.Category, a.Rule, a.Matched, a.Confidence), a.Why); err != nil {
 			return err
 		}
 	}
@@ -194,6 +235,21 @@ func renderVerdict(w io.Writer, v analyze.LeakVerdict, total bool) error {
 		}
 	}
 	return tw.Flush()
+}
+
+// attributionHeadline names a category together with the rule and the strength of
+// the claim.
+//
+// The rule name is printed, not just the category, because a category can come from
+// a configured rule and "which rule said this" is the first question asked when an
+// attribution is surprising. The strength is spelled out as L1 for the same reason:
+// a reader must be able to tell a restatement from an inference without reading the
+// documentation.
+func attributionHeadline(category, rule string, matched bool, confidence attr.Confidence) string {
+	if !matched {
+		return category
+	}
+	return fmt.Sprintf("%s [%s, L1 %s]", category, rule, confidence)
 }
 
 // verdictWord renders the boolean as the words a reader acts on.
