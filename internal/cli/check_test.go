@@ -197,13 +197,18 @@ func TestCheckConvictsARealLeakAndExitsTwo(t *testing.T) {
 // it holds.
 func TestCheckClearsAHealthyProcessAndExitsZero(t *testing.T) {
 	bin := buildCLI(t)
+	// The marker is printed after the opens, not before. It is what the test waits
+	// for, and the test asserts that the level held for the whole window - so the
+	// marker has to mean "the level is established". Printed first, the sampler could
+	// start while the loop was still opening and record 25 -> 28, which is a real
+	// observation of a real race in the fixture, not in the tool.
 	ch, _ := stagedChild(t, `
-echo ready
 i=0
 while [ $i -lt 25 ]; do
   i=$((i+1))
   exec {fd}>"$d/hold-$i.log"
 done
+echo ready
 while :; do sleep 0.05; done
 `)
 
