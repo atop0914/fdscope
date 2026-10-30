@@ -91,6 +91,15 @@ type Snapshot struct {
 	// could not be resolved. A non-zero value means the snapshot is partial
 	// and must be reported as such rather than silently treated as complete.
 	Unreadable int
+	// Counters holds the process-level readings taken with this snapshot:
+	// thread count, read and write syscall counts, resident set size.
+	//
+	// They are captured here, next to the descriptor set, because the only thing
+	// they are used for is answering "what else was the process doing at the
+	// moment the descriptors started growing" - and a counter read a second
+	// earlier would describe a different instant than the descriptors it is
+	// compared with.
+	Counters ProcessCounters
 }
 
 // Len returns the number of captured descriptors.

@@ -107,6 +107,12 @@ func (p *Probe) Snapshot(pid int) (model.Snapshot, error) {
 	}
 
 	dir := p.fdDir(pid)
+	// The auxiliary counters are read before the descriptor walk, not after.
+	// The walk takes as long as the process has descriptors - a second or more on
+	// a large one - and a counter read afterwards would describe a moment that far
+	// from the table it is compared with. Two small file reads first keeps the two
+	// halves of one sample adjacent in time.
+	counters := p.readCounters(pid)
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		switch {
@@ -180,6 +186,7 @@ func (p *Probe) Snapshot(pid int) (model.Snapshot, error) {
 	})
 
 	snap.OpenLimit = p.OpenLimit(pid)
+	snap.Counters = counters
 	return snap, nil
 }
 

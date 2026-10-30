@@ -145,10 +145,11 @@ func (p *Probe) Watch(pid, count int, cfg WatchConfig) (WatchResult, error) {
 		}
 
 		sample := timeline.Sample{
-			Taken:  now().UnixNano(),
-			Total:  snap.Len(),
-			Limit:  snap.OpenLimit,
-			Counts: make(map[string]int, snap.Len()),
+			Taken:    now().UnixNano(),
+			Total:    snap.Len(),
+			Limit:    snap.OpenLimit,
+			Counts:   make(map[string]int, snap.Len()),
+			Counters: snap.Counters,
 		}
 		for _, d := range snap.Descriptors {
 			sample.Counts[d.Fingerprint]++
@@ -176,10 +177,11 @@ var ErrWatchAborted = errors.New("watch aborted before reaching the requested sa
 // across two rows.
 func SampleFromSnapshot(s model.Snapshot) timeline.Sample {
 	sample := timeline.Sample{
-		Taken:  s.Taken,
-		Total:  s.Len(),
-		Limit:  s.OpenLimit,
-		Counts: make(map[string]int, s.Len()),
+		Taken:    s.Taken,
+		Total:    s.Len(),
+		Limit:    s.OpenLimit,
+		Counts:   make(map[string]int, s.Len()),
+		Counters: s.Counters,
 	}
 	for _, d := range s.Descriptors {
 		sample.Counts[d.Fingerprint]++

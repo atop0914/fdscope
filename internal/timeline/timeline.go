@@ -45,6 +45,11 @@ type Sample struct {
 	// headroom figure computed against a limit that has since changed would be
 	// a lie.
 	Limit model.OpenLimit
+	// Counters holds the process-level readings taken with this sample. They
+	// are carried per sample rather than in a side table so that a counter and
+	// the descriptor counts it is compared against can never drift apart by an
+	// index: both are the same sample or neither is.
+	Counters model.ProcessCounters
 }
 
 // Count returns the number of descriptors that held fp in this sample, or 0 when
@@ -141,7 +146,7 @@ func (t *Timeline) Add(s Sample) error {
 	// Copy the map so that a caller mutating its own snapshot cannot retroactively
 	// rewrite history. Without this, a watch loop that reuses one map would turn
 	// every retained sample into the latest one, and the series would look flat.
-	cp := Sample{Taken: s.Taken, Total: s.Total, Limit: s.Limit, Counts: make(map[string]int, len(s.Counts))}
+	cp := Sample{Taken: s.Taken, Total: s.Total, Limit: s.Limit, Counts: make(map[string]int, len(s.Counts)), Counters: s.Counters}
 	for fp, c := range s.Counts {
 		cp.Counts[fp] = c
 	}
@@ -274,9 +279,36 @@ func (t *Timeline) First() (Sample, bool) {
 	return t.samples[t.index(0)], true
 }
 
+// CounterSeries returns one named series per process-level counter, oldest sample
+// first, in the fixed order ProcessCounters.Names defines.
+//
+// Every series is as long as the timeline, including the samples where the
+// counter could not be read: those carry Known=false rather than a zero, so a
+// consumer cannot mistake "the kernel did not answer" for "the value was 0". A
+// series that dropped unknown samples instead would silently shift every later
+// index and misalign the counter with the descriptor counts it is compared to.
+func (t *Timeline) CounterSeries() []model.CounterSeries {
+	samples := t.Samples()
+	var proto model.ProcessCounters
+	names := proto.Names()
+	out := make([]model.CounterSeries, 0, len(names))
+	for _, name := range names {
+		cs := model.CounterSeries{
+			Counter: name,
+			Values:  make([]int64, len(samples)),
+			Known:   make([]bool, len(samples)),
+		}
+		for i, s := range samples {
+			c := s.Counters.Get(name)
+			cs.Values[i], cs.Known[i] = c.Value, c.Known
+		}
+		out = append(out, cs)
+	}
+	return out
+}
+
 // Incomplete reports whether samples were evicted, meaning the retained window
 // does not cover the whole observed period.
-//
 // Reports must say so: "the count rose from 100 to 140 across 60 samples" reads
 // as the full story, and if 5000 samples were discarded the earliest change -
 // usually the interesting one - happened before the window begins.
