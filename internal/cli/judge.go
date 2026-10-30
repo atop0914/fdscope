@@ -8,6 +8,8 @@ import (
 
 	"github.com/atop0914/fdscope/internal/analyze"
 	"github.com/atop0914/fdscope/internal/attr"
+	"github.com/atop0914/fdscope/internal/correlate"
+	"github.com/atop0914/fdscope/internal/model"
 	"github.com/atop0914/fdscope/internal/probe"
 	fdscope "github.com/atop0914/fdscope/pkg/fdscope"
 )
@@ -21,7 +23,13 @@ import (
 type judgedReport struct {
 	watchReport
 	Verdict analyze.LeakReport `json:"verdict"`
-	Summary string             `json:"summary"`
+	// Correlations is the L2 block, hoisted from verdict.correlations. A caller that
+	// reads one field should not have to know where in the verdict it lives; the
+	// values are the verdict's own rows, not a second computation.
+	Correlations      []correlate.Correlation `json:"correlations,omitempty"`
+	CorrelationAnchor string                  `json:"correlation_anchor,omitempty"`
+	CorrelationNotes  []string                `json:"correlation_notes,omitempty"`
+	Summary           string                  `json:"summary"`
 }
 
 // writeJudgedJSON writes the shape report and the verdict as a single document.
@@ -31,9 +39,12 @@ func writeJudgedJSON(w io.Writer, rep analyze.Report, res probe.WatchResult, top
 	out := buildWatchReport(rep, res, top)
 	out.Totals = series
 	return enc.Encode(judgedReport{
-		watchReport: out,
-		Verdict:     lr,
-		Summary:     fdscope.Summarize(lr),
+		watchReport:       out,
+		Verdict:           lr,
+		Correlations:      lr.Correlations,
+		CorrelationAnchor: lr.CorrelationAnchor,
+		CorrelationNotes:  lr.CorrelationNotes,
+		Summary:           fdscope.Summarize(lr),
 	})
 }
 
@@ -79,17 +90,100 @@ func renderJudgeTable(w io.Writer, rep analyze.LeakReport) error {
 		if _, err := fmt.Fprintln(w, "no single resource was judged a leak on its own"); err != nil {
 			return err
 		}
-		return nil
-	}
-	if _, err := fmt.Fprintf(w, "\n%d resource(s) judged a leak:\n", len(leaks)); err != nil {
-		return err
-	}
-	for _, v := range leaks {
-		if err := renderVerdict(w, v, false); err != nil {
+	} else {
+		if _, err := fmt.Fprintf(w, "\n%d resource(s) judged a leak:\n", len(leaks)); err != nil {
+			return err
+		}
+		for _, v := range leaks {
+			if err := renderVerdict(w, v, false); err != nil {
+				return err
+			}
+		}
+		if err := renderBreakdown(w, rep.Attribution); err != nil {
 			return err
 		}
 	}
-	return renderBreakdown(w, rep.Attribution)
+	return renderCorrelation(w, rep)
+}
+
+// renderCorrelation prints the L2 block: which counters moved with the onset.
+//
+// It is printed last because it answers the question a reader arrives at after
+// the verdict and the classification: "so when did this start, and what else
+// happened then". The header says "co-occurrence, not cause" in the table itself,
+// not only in the documentation - a reader who screenshots the block must take the
+// caveat with it.
+//
+// Nothing is printed when no anchor exists, which is the clean-run case: an empty
+// section on every healthy report is how a section stops being read.
+func renderCorrelation(w io.Writer, rep analyze.LeakReport) error {
+	if rep.CorrelationAnchor == "" {
+		return nil
+	}
+	label := rep.CorrelationAnchor
+	if label == "(total)" {
+		label = "the process total"
+	}
+	if _, err := fmt.Fprintf(w, "\ncorrelation with the onset of %s (co-occurrence only, never a cause)\n", label); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(w, "  anchored on  rise from sample %d of %d\n",
+		rep.CorrelationOnset, rep.Samples); err != nil {
+		return err
+	}
+	if len(rep.Correlations) == 0 {
+		// Saying this is the useful half of the answer when it is true: the growth was
+		// not accompanied by new threads, new memory or new syscalls, so the reader
+		// should stop looking for an obvious companion.
+		if _, err := fmt.Fprintln(w, "  no counter moved with it"); err != nil {
+			return err
+		}
+	} else {
+		tw := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
+		for _, c := range rep.Correlations {
+			if _, err := fmt.Fprintf(tw, "  %s\t%s\t%d/%d samples\tconfidence %s\tcorrelation only\n",
+				c.Counter, correlationDelta(c), c.Overlap, c.Window, c.Confidence); err != nil {
+				return err
+			}
+		}
+		if err := tw.Flush(); err != nil {
+			return err
+		}
+	}
+	// The counters that were examined and ruled out are named, not dropped: "syscr
+	// did not move" is evidence against the obvious explanation, and a report that
+	// silently omitted it would leave the reader wondering whether it was checked.
+	for _, n := range rep.CorrelationNotes {
+		if _, err := fmt.Fprintf(w, "  ruled out: %s\n", n); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// correlationDelta renders the change in the counter's own units.
+//
+// The resident set is divided down: "+50331648" is the kind of number a reader
+// skips, and a skipped number is the same as no number. Everything else is printed
+// raw with its unit implied by the counter name.
+func correlationDelta(c correlate.Correlation) string {
+	if c.Counter != model.CounterRSS {
+		return fmt.Sprintf("%+d", c.Delta) + percentSuffix(c.DeltaPct)
+	}
+	const mib = 1 << 20
+	if c.Delta >= mib || c.Delta <= -mib {
+		return fmt.Sprintf("%+.1fMiB", float64(c.Delta)/mib) + percentSuffix(c.DeltaPct)
+	}
+	return fmt.Sprintf("%+dKiB", c.Delta/1024) + percentSuffix(c.DeltaPct)
+}
+
+// percentSuffix renders the relative change, or nothing when there was no baseline
+// to take a percentage of.
+func percentSuffix(pct *float64) string {
+	if pct == nil {
+		return ""
+	}
+	return fmt.Sprintf(" (%+.0f%%)", *pct)
 }
 
 // renderBreakdown prints the leak grouped by resource class.

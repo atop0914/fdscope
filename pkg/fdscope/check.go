@@ -15,6 +15,7 @@ import (
 
 	"github.com/atop0914/fdscope/internal/analyze"
 	"github.com/atop0914/fdscope/internal/attr"
+	"github.com/atop0914/fdscope/internal/correlate"
 	"github.com/atop0914/fdscope/internal/model"
 	"github.com/atop0914/fdscope/internal/probe"
 )
@@ -39,6 +40,11 @@ type (
 	CategoryAttribution = attr.CategoryAttribution
 	// AttrEngine is the attribution rule set an embedder may configure.
 	AttrEngine = attr.Engine
+	// Correlation is one process-level counter that moved with the onset of a
+	// leak. It is L2 evidence: co-occurrence, never causation.
+	Correlation = correlate.Correlation
+	// CorrelationConfidence states how many readings backed a correlation.
+	CorrelationConfidence = correlate.Confidence
 )
 
 // Confidence levels reported by fdscope.

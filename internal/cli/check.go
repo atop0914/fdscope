@@ -186,8 +186,16 @@ type checkReport struct {
 	// not have to know that the process total is not a resource. It is a copy of
 	// the verdict's rows, not a second computation that could disagree with them.
 	Attribution []fdscope.CategoryAttribution `json:"attribution,omitempty"`
-	Verdict     fdscope.LeakReport            `json:"verdict"`
-	Summary     string                        `json:"summary"`
+	// Correlations is the L2 block, hoisted from verdict.correlations for the same
+	// reason as Attribution: a CI job reading one field should not have to know where
+	// inside the verdict it lives. The rows are the verdict's own, not a second
+	// computation that could disagree with them.
+	Correlations      []fdscope.Correlation `json:"correlations,omitempty"`
+	CorrelationAnchor string                `json:"correlation_anchor,omitempty"`
+	CorrelationOnset  int                   `json:"correlation_onset,omitempty"`
+	CorrelationNotes  []string              `json:"correlation_notes,omitempty"`
+	Verdict           fdscope.LeakReport    `json:"verdict"`
+	Summary           string                `json:"summary"`
 }
 
 func buildCheckReport(res fdscope.CheckResult, leak fdscope.LeakOptions) checkReport {
@@ -205,12 +213,16 @@ func buildCheckReport(res fdscope.CheckResult, leak fdscope.LeakOptions) checkRe
 			MinSamples:       leak.MinSamples,
 			Warmup:           leak.Warmup,
 		},
-		Totals:      res.Totals,
-		Headroom:    res.Headroom,
-		Projection:  res.Report.Total.Projection,
-		Attribution: res.Report.Attribution,
-		Verdict:     res.Report,
-		Summary:     fdscope.Summarize(res.Report),
+		Totals:            res.Totals,
+		Headroom:          res.Headroom,
+		Projection:        res.Report.Total.Projection,
+		Attribution:       res.Report.Attribution,
+		Correlations:      res.Report.Correlations,
+		CorrelationAnchor: res.Report.CorrelationAnchor,
+		CorrelationOnset:  res.Report.CorrelationOnset,
+		CorrelationNotes:  res.Report.CorrelationNotes,
+		Verdict:           res.Report,
+		Summary:           fdscope.Summarize(res.Report),
 	}
 }
 
