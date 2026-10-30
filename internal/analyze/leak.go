@@ -37,6 +37,7 @@ import (
 	"time"
 
 	"github.com/atop0914/fdscope/internal/attr"
+	"github.com/atop0914/fdscope/internal/correlate"
 	"github.com/atop0914/fdscope/internal/model"
 	"github.com/atop0914/fdscope/internal/timeline"
 )
@@ -745,6 +746,28 @@ type LeakReport struct {
 	// verdicts keep their own attribution for the reader who wants the
 	// individual resources.
 	Attribution []attr.CategoryAttribution `json:"attribution,omitempty"`
+	// Correlations is the L2 block: the process-level counters that moved in the
+	// same window as the onset of the growth. It is empty when nothing leaked -
+	// there is no onset to correlate against - and also when nothing moved, in
+	// which case CorrelationNotes says which counters were ruled out.
+	Correlations []correlate.Correlation `json:"correlations,omitempty"`
+	// CorrelationAnchor names the series whose onset the correlations were taken
+	// against: "(total)" when the process total leaked, otherwise the largest
+	// leaking resource. It is a separate field because a correlation is
+	// meaningless without knowing which growth it was measured against, and
+	// leaving the reader to guess would let two runs be compared as if they
+	// described the same event.
+	CorrelationAnchor string `json:"correlation_anchor,omitempty"`
+	// CorrelationOnset is the sample index where the anchor's count left its
+	// settled level - the sample the counters were compared against. It is omitted
+	// when it is zero, which is the case the note explains: the rise began at the
+	// first sample and there was no baseline.
+	CorrelationOnset int `json:"correlation_onset,omitempty"`
+	// CorrelationNotes explains the counters that produced no correlation, and
+	// the windows that could not support one. This is not noise: "no counter moved
+	// with the onset" is a finding, and it is the finding that rules out the
+	// obvious explanation.
+	CorrelationNotes []string `json:"correlation_notes,omitempty"`
 }
 
 // Leaks returns the series verdicts that found a leak, largest growth first.
@@ -904,6 +927,10 @@ func Judge(tl *timeline.Timeline, opts LeakOptions) (LeakReport, error) {
 
 	rep.Leaking = rep.Total.Leak || len(rep.Leaks()) > 0
 	attachAttribution(&rep, tl, opt.Attr)
+	// Correlations are attached last: they need rep.Leaking, which is only known
+	// once the constant-window rewrite above has run and the per-series verdicts
+	// are final.
+	attachCorrelation(&rep, tl)
 	return rep, nil
 }
 
@@ -977,8 +1004,50 @@ func samplingPeriod(taken []int64) time.Duration {
 	return time.Duration((taken[len(taken)-1] - taken[0]) / int64(len(taken)-1))
 }
 
-// downgrade caps a verdict's confidence at low, used when samples were evicted.
+// attachCorrelation fills in the L2 block: which process-level counters moved in
+// the window that opened with the growth.
 //
+// The anchor is chosen before the counters are compared, and it is chosen the way
+// an operator would choose it: the process total when the total leaked, otherwise
+// the largest leaking resource. Two runs are only comparable if it is clear which
+// growth the counters were measured against, which is why the anchor travels with
+// the block instead of being implied by the surrounding text.
+//
+// The onset is stablePrefix of the anchor's own series - the same function, with
+// the same flat tolerance, that decides where the leak judgement's baseline sits.
+// It is deliberately *not* the clamped warm-up the verdict uses: that clamp is a
+// threshold decision about which baseline a ratio floor should be measured from,
+// while "when did the count leave its settled level" is a fact about the series.
+// Using one function for both keeps them from disagreeing about what movement is.
+//
+// Nothing is attached for a run that did not leak. A correlation answers "what was
+// happening when it started", and asking it of a clean process would produce a
+// section full of counters that move for their own reasons - which is precisely the
+// noise that teaches a reader to skip the section.
+func attachCorrelation(rep *LeakReport, tl *timeline.Timeline) {
+	if tl == nil || tl.Len() < 2 || !rep.Leaking {
+		return
+	}
+	anchor, counts := "(total)", tl.TotalSeries().Counts
+	if !rep.Total.Leak {
+		leaks := rep.Leaks()
+		if len(leaks) == 0 {
+			// Leaking with no leaking series and no leaking total is not a state the
+			// judgement can produce; refusing to correlate is the safe reading of it.
+			return
+		}
+		anchor, counts = leaks[0].Fingerprint, tl.FingerprintSeries(leaks[0].Fingerprint).Counts
+	}
+
+	onset := stablePrefix(counts)
+	cr := correlate.Compare(tl.CounterSeries(), tl.Len(), onset)
+	rep.CorrelationAnchor = anchor
+	rep.CorrelationOnset = onset
+	rep.Correlations = cr.Correlations
+	rep.CorrelationNotes = cr.Notes
+}
+
+// downgrade caps a verdict's confidence at low, used when samples were evicted.
 // The projection is capped too: its rate was fitted to a window whose beginning
 // is unknown, and an ETA quoted from a window that may have started mid-leak is
 // the same overstated claim the verdict just refused to make.
