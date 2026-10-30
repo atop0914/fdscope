@@ -67,6 +67,18 @@ func buildFixture(t *testing.T) string {
 	return bin
 }
 
+// buildOpenFixture compiles the descriptor-only child the reverse assertion
+// drives.
+func buildOpenFixture(t *testing.T) string {
+	t.Helper()
+	bin := filepath.Join(t.TempDir(), "openfixture")
+	out, err := exec.Command("go", "build", "-o", bin, "./testdata/openfixture").CombinedOutput()
+	if err != nil {
+		t.Fatalf("build the descriptor-only fixture: %v\n%s", err, out)
+	}
+	return bin
+}
+
 // startFixture runs the leaking child in its own session and returns its pid.
 func startFixture(t *testing.T, bin, dir, gate string) int {
 	t.Helper()
@@ -174,25 +186,22 @@ func TestCheckCorrelatesTheOnsetWithRealActivity(t *testing.T) {
 // plan: a fixture that only opens descriptors - no writes, no threads, no memory -
 // must produce no correlation at all.
 //
-// This is the case that decides whether L2 is worth reading. `exec {fd}>/dev/null`
-// in a loop grows the descriptor table and touches nothing else, so any counter named
-// here would be a coincidence promoted to a finding.
+// This is the case that decides whether L2 is worth reading, so the fixture has to
+// be a process that genuinely does nothing else. `exec {fd}>/dev/null` in a bash
+// loop was not: on CI its read-syscall counter rose by +300 (+88%) across the
+// window, because pacing a bash loop costs syscalls of the shell's own and those
+// were reported as co-occurring activity. The fixture is therefore a Go program
+// (testdata/openfixture) that opens, sleeps and nothing more - no forks, no reads,
+// no allocation growth.
 func TestCheckReportsNoCorrelationForDescriptorsAlone(t *testing.T) {
 	bin := buildCLI(t)
-	ch, _ := stagedChild(t, `
-echo ready
-while [ ! -e "$d/go" ]; do sleep 0.01; done
-i=0
-while :; do
-  i=$((i+1))
-  exec {fd}>/dev/null
-  sleep 0.08
-done
-`)
-	gate := filepath.Join(ch.dir, "go")
+	fixture := buildOpenFixture(t)
+	dir := t.TempDir()
+	gate := filepath.Join(dir, "go")
+	pid := startFixture(t, fixture, dir, gate)
 
 	doc, errOut, err := triggerAfter(t, bin, gate, 350*time.Millisecond,
-		strconv.Itoa(ch.pid()), "--json", "--interval", "120ms", "--samples", "25")
+		strconv.Itoa(pid), "--json", "--interval", "120ms", "--samples", "25")
 	if code := exitCodeOf(t, err); code != 2 {
 		t.Fatalf("exit = %d, want 2: the fixture leaks descriptors\nstdout:\n%+v\nstderr:\n%s",
 			code, doc, errOut)
