@@ -49,6 +49,11 @@ type WatchResult struct {
 	// Err is the error that stopped the run, if any. io.EOF-equivalent success
 	// leaves it nil.
 	Err error
+	// ClockSteps counts samples whose timestamp had to be forced forward because the
+	// run's clock went backwards. Zero on a healthy machine; a non-zero value says
+	// the time axis was corrected and the window is a little shorter than the labels
+	// suggest.
+	ClockSteps int
 }
 
 // OK reports whether the run completed its requested number of samples.
@@ -94,10 +99,9 @@ func (p *Probe) Watch(pid, count int, cfg WatchConfig) (WatchResult, error) {
 	if cfg.Capacity < 1 {
 		return WatchResult{}, fmt.Errorf("timeline capacity must be at least 1, got %d", cfg.Capacity)
 	}
-	now := cfg.Now
-	if now == nil {
-		now = time.Now
-	}
+	// The clock is read once and every later stamp is measured from it, so that a
+	// wall-clock correction cannot make the series go backwards. See stampClock.
+	clk := newStampClock(cfg.Now)
 
 	tl, err := timeline.New(pid, cfg.Capacity)
 	if err != nil {
@@ -145,7 +149,7 @@ func (p *Probe) Watch(pid, count int, cfg WatchConfig) (WatchResult, error) {
 		}
 
 		sample := timeline.Sample{
-			Taken:    now().UnixNano(),
+			Taken:    clk.stamp(),
 			Total:    snap.Len(),
 			Limit:    snap.OpenLimit,
 			Counts:   make(map[string]int, snap.Len()),
@@ -160,6 +164,7 @@ func (p *Probe) Watch(pid, count int, cfg WatchConfig) (WatchResult, error) {
 	}
 
 	res.Err = nil
+	res.ClockSteps = clk.steps
 	return res, nil
 }
 
@@ -228,6 +233,7 @@ func (p *Probe) SampleTimeline(pid, count int, interval time.Duration) (*timelin
 		return nil, err
 	}
 
+	clk := newStampClock(nil)
 	for i := 0; i < count; i++ {
 		if i > 0 && interval > 0 {
 			time.Sleep(interval)
@@ -248,7 +254,12 @@ func (p *Probe) SampleTimeline(pid, count int, interval time.Duration) (*timelin
 		if !snap.Complete() {
 			continue
 		}
-		if addErr := tl.Add(SampleFromSnapshot(snap)); addErr != nil {
+		sample := SampleFromSnapshot(snap)
+		// The stamp comes from the run's clock, not from the snapshot: the snapshot's
+		// own time is a wall-clock reading, and a step between two of them would be
+		// rejected here for a reason that has nothing to do with the process.
+		sample.Taken = clk.stamp()
+		if addErr := tl.Add(sample); addErr != nil {
 			return tl, addErr
 		}
 	}
