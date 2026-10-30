@@ -121,10 +121,23 @@
 | 用子串匹配 `log` | `strings.Contains(path, "log")` 会把 `/var/lib/catalog/index` 判成日志。规则用 `.log` 后缀或 `log`/`logs` **整段目录名**，理由与反例都写在 `looksLikeLog` 的注释里 |
 | 任何「可能是 X 打开的」措辞 | 那是 L2/L3 的地盘，而且必须带强度标注。`TestReasonsContainNoGuesswork` 用禁词表守着这一条 —— 行为测试抓不到措辞，所以措辞也要有测试 |
 
-## 与 L2 / L3 的边界
+## L1 与 L2 的强度差别
 
-- L1（本文件）：**可证明**。强度恒为 `high`，输出里会写成 `L1 high`。
-- L2（Day 8）：泄漏起始时刻 ↔ 进程内事件的**相关性**，必须标注样本数与「相关」字样。
-- L3（Day 9）：测试期 `runtime.Stack` 与 fd 变化的**采样配对**，采样不到就说采样不到。
+| | L1（本文件） | L2（`internal/correlate`） |
+|---|---|---|
+| 输入 | 指纹本身（scheme / kind / path / deleted） | 同一窗口内的进程级读数（threads / syscr / syscw / rss） |
+| 说的话 | 「这类资源是什么」 | 「增长开始时，这个计数器也在动」 |
+| 强度 | `high`，恒定为可证明的复述 | `low` / `medium` / `high`，只描述窗口里有多少个样本读到了值 |
+| 能否说「谁」 | 不能，也不暗示 | **更不能**。note 里明写「不是关于谁打开的结论」 |
+| 反向条件 | 该不报的不报（未泄漏的 series 不带归因） | 计数器没动、读不到、样本不足，都不产出 |
+| 相关测试 | `TestReasonsContainNoGuesswork` | `TestNotesCarryNoCausalLanguage`（禁词表加了 `caused` / `because` / `due to`） |
+
+一句话的分界线：**L1 复述证据，L2 报时间上的巧合**。两者都绝不能滑到
+「所以是它干的」—— 那是三层里唯一永远不会有的结论，因为 `/proc` 不提供。
+
+## 与 L3 的边界
+
+- L3（Day 9，未实现）：测试期 `runtime.Stack` 与 fd 变化的**采样配对**，
+  采样不到就说采样不到。
 
 三层的字段与标签是同一套，读者不需要知道实现细节就能判断一句话有多硬。

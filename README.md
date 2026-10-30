@@ -213,6 +213,43 @@ them:
 $ fdscope check 4242 --attr-rules rules.json
 ```
 
+### Correlation: what else was happening when it started
+
+L1 says *what* is growing. L2 answers the next question — *when did it start,
+and what else was the process doing then* — by comparing the process-level
+counters `/proc` already exposes against the sample where the count left its
+settled level:
+
+```console
+correlation with the onset of the process total (co-occurrence only, never a cause)
+  anchored on  rise from sample 8 of 25
+  rss          +68.5MiB (+1030%)   23/23 samples   confidence high   correlation only
+  ruled out: threads did not move enough to correlate (+0 threads, needs 2 threads or 50%)
+  ruled out: syscw could not be read before the window, so there is no baseline to compare against
+```
+
+Four counters are read with every sample: `threads`, `syscr`, `syscw` and `rss`.
+A counter that did not move produces nothing, and the ones that were checked and
+ruled out are named — "no counter moved with it" is a finding, and it is the
+finding that removes the obvious explanation.
+
+Three things this block will never say, and the tests that keep it that way:
+
+- **Not a cause.** Every note carries the word *correlation*; a forbidden-word
+  scan rejects `caused`, `because`, `due to`. Co-occurrence in one window is all
+  `/proc` can support.
+- **Not a probability.** `confidence` describes how many samples of the window
+  had a readable reading — nothing else.
+- **Not a zero for an unreadable counter.** `syscr`/`syscw` live in
+  `/proc/<pid>/io`, which needs `CONFIG_TASK_IO_ACCOUNTING` and, for another
+  user's process, `CAP_SYS_PTRACE`. When it cannot be read the counter is
+  `unknown` and is skipped, never compared as if the kernel had answered 0.
+
+The onset is the same `stablePrefix` the leak judgement uses to place its
+baseline, so the two layers cannot disagree about when the growth started. When
+the rise began at the first sample there is no baseline, and the block says so
+instead of inventing one.
+
 A rule file is strictly parsed: unknown fields, unknown kinds, a rule with no
 predicate, an empty rule list — each is an error naming the line it is on.
 Sitting on a typo would turn "I added a rule and nothing changed" into a mystery.
@@ -417,8 +454,8 @@ trusted:
 
 ## Status
 
-Day 7 of 12. `snapshot`, `diff`, `watch`, `watch --judge`, `check`, the EMFILE
-projection and L1 attribution are working, and the verdict is reachable as a
-library (`CheckPID`, `LeakCheck`). L2 (timing correlation) and L3 (test-time
-goroutine pairing) are not built yet. See the roadmap for the exact boundary —
-this file does not claim features that do not exist.
+Day 8 of 12. `snapshot`, `diff`, `watch`, `watch --judge`, `check`, the EMFILE
+projection, L1 attribution and L2 correlation are working, and the verdict is
+reachable as a library (`CheckPID`, `LeakCheck`). L3 (test-time goroutine
+pairing) is not built yet. See the roadmap for the exact boundary — this file
+does not claim features that do not exist.

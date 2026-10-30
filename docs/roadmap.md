@@ -16,6 +16,7 @@
 | 公共库 `pkg/fdscope` | `pkg/fdscope` | 快照 API；`CheckPID` 判定；`LeakCheck` goleak 式断言 |
 | CLI `check` | `internal/cli/check.go` | 一次窗口一次结论，退出码 0/2/1（1 = 没能判定） |
 | L1 归因 | `internal/attr` | 指纹 → 类别规则（数据驱动 + `--attr-rules`）；泄漏按类别分摊增长 |
+| L2 相关性 | `internal/correlate` | 泄漏起点 ↔ 进程级计数器（threads / syscr / syscw / rss）；只报相关，置信度只描述重叠样本数 |
 | 跨平台可编译 + 非 Linux 明确拒绝 | `internal/probe/supported_*.go` | 不假装支持 |
 | CI（test/lint/零依赖闸门/交叉编译） | `.github/workflows/ci.yml` | golangci-lint v2.12.2 |
 
@@ -29,7 +30,7 @@
 | Day 5 | `check` 子命令 + 库级断言 API（`CheckPID` / `LeakCheck`） | done |
 | Day 6 | 上限余量与 `EMFILE` 预测 | done |
 | Day 7 | L1 归因：指纹 → 类型/路径规则（`internal/attr` + `--attr-rules`） | done |
-| Day 8 | L2 归因：泄漏起始时刻 ↔ 进程内事件（标注相关性） | todo |
+| Day 8 | L2 归因：泄漏起始时刻 ↔ 进程内事件（标注相关性） | done |
 | Day 9 | L3 归因：测试期 goroutine 配对 | todo |
 | Day 10 | 真实语料回归（含外部项目里的真 bug 复现） | todo |
 | Day 11 | 文档、基准、Release 工作流 | todo |
@@ -44,10 +45,14 @@
 | 自动 `Close()` 或「修复」泄漏 | 工具不能替调用方决定资源生命周期；关错 fd 比泄漏严重得多 |
 | ptrace / eBPF 追踪 `open()` 调用 | 需要特权，且在容器里常常不可用；会改变被测进程行为 |
 | 非 Linux 的平台兜底 | 空快照 = 静默通过，比不支持更危险（见 [design.md](design.md)） |
+| 读不到的计数器填 0 | `syscw = 0` 是「没写过」这个事实；填 0 会让相关层把要找的活动无声排除，报告里也看不出这次读数没发生 |
 | 猜测「是哪个函数打开的」 | `/proc` 没有这个信息；编造归因比不给归因更有害 |
 | L1 判「目录 fd」 | `readlink` 对目录与普通文件输出同形（实测），要区分只能 `stat`，而 `stat` 会依赖采样之外的世界状态 |
 | L1 判「已删除且可写」 | 可写性来自 `fdinfo` 的 flags，指纹里没有 |
-| 把相关性写成因果 | L2 归因始终标注为相关性 |
+| 把相关性写成因果 | L2 归因始终标注为相关性，禁词表由测试守着 |
+| L2 相关「是谁」或「哪个 goroutine」 | 计数器是进程级的；要落到 goroutine 只能靠 L3 的栈采样，而栈是采样时刻的快照 |
+| 给 L2 一个「概率」 | 置信度只描述窗口里读到值的样本数。把它说成概率就等于把证据量当成因果强度 |
+| 用 ptrace / eBPF 抓 open() 做精确归因 | 需要特权，容器里常常不可用，而且会改变被测进程行为 —— 与「只读 /proc」这条底线冲突 |
 | 图形界面 | 目标是 CI 与排障终端，`--json` 供上层消费 |
 
 ## 判定「完成」的标准

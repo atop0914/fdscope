@@ -98,6 +98,40 @@ Max open files            unlimited            unlimited            files      #
 - ETA 的可读性也是正确性的一部分：`524278s` 这种六位数秒没人会换算，
   超过一天一律换成天，「一个月以外」直接说远离上限。
 
+## 3.5 `/proc/<pid>/status` 与 `/proc/<pid>/io` — 相关性用的进程级读数
+
+L2 相关性（[design.md 第 13 章](design.md)）需要知道「fd 开始涨的时候，进程还在做什么」。
+`/proc` 现成能给的只有四个计数器，全部只读、不插桩、不 ptrace：
+
+| 来源 | 字段 | 含义 |
+|------|------|------|
+| `status` | `Threads` | 线程数 |
+| `status` | `VmRSS`（kB） | 常驻内存；fdscope 内部换算成字节 |
+| `io` | `syscr` | `read(2)` 调用次数 |
+| `io` | `syscw` | `write(2)` 调用次数 |
+
+**每一项独立地 known / unknown**，不是一个开关：
+
+- 内核线程没有 `VmRSS` 行（报 0 就等于说「它不占内存」）
+- `/proc/<pid>/io` 对非本用户进程需要 `CAP_SYS_PTRACE`，读不到是常态
+- 编译内核时没开 `CONFIG_TASK_IO_ACCOUNTING`，`io` 文件**整个不存在**
+  （本机容器实测：`ls /proc/self/io` → No such file）。这种情况下 `syscr`/`syscw`
+  恒为 unknown，相关层只剩线程数与 RSS 两个输入
+
+```console
+$ cat /proc/self/status | grep -E '^(Threads|VmRSS)'
+Threads:	1
+VmRSS:	    1936 kB
+
+$ cat /proc/self/io
+rchar: 9000
+syscr: 120
+syscw: 45
+```
+
+`syscw` 才是「写系统调用次数」，`open()` 不计入其中 —— 所以一个只开 fd 不写的
+进程，`syscw` 应该是平的，这正是 L2 反向断言的夹具（`exec {fd}>/dev/null`）。
+
 ## 4. 为什么不用 `/proc/<pid>/exe`、`/proc/<pid>/maps`
 
 - `exe` / `maps` 能告诉你二进制与内存映射，与「fd 泄漏」无关
