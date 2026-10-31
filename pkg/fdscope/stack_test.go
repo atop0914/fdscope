@@ -79,15 +79,24 @@ func TestLeakCheckWithStacksNamesWhereTheGoroutinesSit(t *testing.T) {
 }
 
 // TestLeakCheckWithStacksDoesNotAccuseTheRestOfTheProcess is the reverse
-// assertion for L3. The test's own goroutine existed before the check and must
-// not be listed; a comparison that reported every goroutine would answer "the
-// whole program" to every question.
+// assertion for L3. The test's own goroutine and the one running the check
+// existed before it and must not be listed; a comparison that reported every
+// goroutine would answer "the whole program" to every question.
+//
+// The assertion is the number of groups, not the absence of a substring: the
+// report prints only the frame each goroutine sits in, so the name of a harness
+// function never appears even when that goroutine was wrongly reported. An
+// earlier draft looked for "testing.tRunner" and passed with the comparison
+// deliberately broken - the mutation check found it.
 func TestLeakCheckWithStacksDoesNotAccuseTheRestOfTheProcess(t *testing.T) {
 	report := stackLeak(t, WithStacks(), WithSettle(80*time.Millisecond))
 
-	for _, frame := range []string{"testing.tRunner", "runtime.goexit", "leakcheck."} {
+	if n := strings.Count(report, "goroutine(s) sitting in"); n != 1 {
+		t.Fatalf("%d stacks were reported, want exactly the one the leak lives in:\n%s", n, report)
+	}
+	for _, frame := range []string{"stackpair.", "testing.", "leakcheck."} {
 		if strings.Contains(report, frame) {
-			t.Errorf("a goroutine that existed before the check was listed through %q:\n%s", frame, report)
+			t.Errorf("a goroutine that existed before the check was named through %q:\n%s", frame, report)
 		}
 	}
 	// And it must not list the runtime's own workers either: they start on their
