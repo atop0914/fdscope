@@ -32,6 +32,7 @@ import (
 	"time"
 
 	"github.com/atop0914/fdscope/internal/probe"
+	"github.com/atop0914/fdscope/internal/stackpair"
 )
 
 // DefaultSettle is how long LeakCheck waits, sampling, for asynchronously
@@ -63,6 +64,7 @@ type leakCheckConfig struct {
 	settle    time.Duration
 	tolerance int
 	ignore    []string
+	stacks    bool
 }
 
 // LeakCheckOption configures LeakCheck.
@@ -97,6 +99,35 @@ func WithTolerance(n int) LeakCheckOption {
 // is to name them, not to loosen the check for everything.
 func WithIgnoredFingerprints(prefixes ...string) LeakCheckOption {
 	return func(c *leakCheckConfig) { c.ignore = append(c.ignore, prefixes...) }
+}
+
+// WithStacks adds the L3 layer: the goroutines that did not exist before the
+// checked code ran, grouped by stack, printed alongside the descriptors that
+// stayed open.
+//
+// It answers "roughly which code", and that is all it answers. Two goroutine
+// dumps, one either side of fn, can only support the sentence "these goroutines
+// were not here before and they are here now". A dump is a photograph, not a
+// log: it does not say which goroutine opened a descriptor, or when, and a
+// goroutine that existed all along and started opening descriptors during fn is
+// invisible to it.
+//
+//	func TestPoolWarmup(t *testing.T) {
+//		fdscope.LeakCheck(t, func() { pool.Warm() }, fdscope.WithStacks())
+//	}
+//
+// Two reasons it is opt-in rather than always on. It costs a full dump of every
+// goroutine in the process, twice - hundreds of kilobytes and a stop-the-world
+// moment each time - which is a real price for a package that is meant to be
+// free to add to any test. And its claim is the weakest of the three layers, so
+// it should be a deliberate choice rather than a default every reader has to
+// learn to discount.
+//
+// There is no command-line equivalent, and that is not an omission: stacks of
+// another process are not available without ptrace or a signal, both of which
+// fdscope refuses to use, so L3 only exists inside the process under test.
+func WithStacks() LeakCheckOption {
+	return func(c *leakCheckConfig) { c.stacks = true }
 }
 
 // LeakCheck runs fn and reports through t every resource whose descriptor count
@@ -148,6 +179,24 @@ func LeakCheck(t TestingT, fn func(), opts ...LeakCheckOption) {
 		return
 	}
 
+	// The L3 capture, when it was asked for, is taken before fn and next to the
+	// fd baseline: both are "the state of the process before the code ran", and
+	// taking them back to back keeps the two photographs of one process close
+	// together in time.
+	var stacksBefore stackpair.Capture
+	var stackErr error
+	if cfg.stacks {
+		stacksBefore, stackErr = stackpair.CaptureGoroutines()
+		if stackErr != nil {
+			// A truncated dump is a random subset of the goroutine set. Pairing
+			// from it would describe some of the goroutines as if they were all of
+			// them, so the request for stacks fails - without taking the fd check
+			// down with it, because the descriptor comparison itself is still valid.
+			t.Errorf("fdscope: the goroutine set could not be captured in full before the check, so "+
+				"no stacks are paired with the descriptors below: %v", stackErr)
+		}
+	}
+
 	before, beforeErr := snapshotSelf()
 	fn()
 	if beforeErr != nil {
@@ -173,10 +222,27 @@ func LeakCheck(t TestingT, fn func(), opts ...LeakCheckOption) {
 		return
 	}
 
-	for _, row := range grownFingerprints(before, after, cfg) {
+	rows := grownFingerprints(before, after, cfg)
+	for _, row := range rows {
 		t.Errorf("fdscope: %d descriptor(s) for %s stayed open (%d before, %d after; %+d): "+
 			"the checked code returned without releasing them",
 			row.Delta, row.Fingerprint, row.Before, row.After, row.Delta)
+	}
+
+	// L3 is printed only when there is a leak to explain. A clean run stays
+	// silent, and that silence is the reverse assertion this layer is judged by:
+	// a checker that prints a stack section on every green test is one that gets
+	// switched off.
+	if cfg.stacks && stackErr == nil && len(rows) > 0 {
+		stacksAfter, afterErr := stackpair.CaptureGoroutines()
+		if afterErr != nil {
+			t.Errorf("fdscope: no stacks are paired with the descriptors above: the goroutine set "+
+				"after the check could not be captured in full: %v", afterErr)
+			return
+		}
+		for _, msg := range stackpair.Diff(stacksBefore, stacksAfter).Messages() {
+			t.Errorf("fdscope: %s", msg)
+		}
 	}
 }
 
