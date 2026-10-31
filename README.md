@@ -413,7 +413,36 @@ not apply once the work is over.
 `LeakCheck` options: `WithSettle` (how long to keep sampling for lazily released
 descriptors, default 50ms), `WithTolerance` (how much per-resource growth to
 ignore, default 0), `WithIgnoredFingerprints` (name the harness's own descriptors
-instead of loosening the check for everything).
+instead of loosening the check for everything), and `WithStacks` (see below).
+
+Asking where the descriptors were held, rather than only how many:
+
+```go
+func TestPoolWarmup(t *testing.T) {
+    fdscope.LeakCheck(t, func() { pool.Warm() }, fdscope.WithStacks())
+}
+```
+
+```
+fdscope: 12 descriptor(s) for socket stayed open (0 before, 12 after; +12): ...
+fdscope: L3 sampling: 12 goroutine(s) appeared while the checked code ran (the
+process held 4 before and 19 after); compared by goroutine id. This is a
+photograph of two instants, not the moment each descriptor was opened
+fdscope: L3 sampling: 12 goroutine(s) sitting in
+example.com/cache.(*Loader).refresh (loader.go:88), created by example.com/cache.New;
+one line per distinct stack, not one per goroutine
+```
+
+Two goroutine dumps, one either side of the call. What that supports is exactly
+one sentence — these goroutines were not here before and they are here now. It is
+the only layer that can name a function, and the weakest of the three: a dump
+carries no owner for a descriptor, it cannot see a goroutine that existed all
+along, and it cannot see what happened between the two photographs. Hence opt-in,
+hence the `L3 sampling` prefix on every line.
+
+There is deliberately no `--stacks` flag: stacks of another process are only
+available through ptrace or a signal, and fdscope uses neither. L3 exists inside
+the process under test or not at all.
 
 On a platform without `/proc`, `LeakCheck` **reports a failure** and `CheckPID`
 returns `ErrNotLinux`: a green test would otherwise claim nothing leaked when in
@@ -454,8 +483,9 @@ trusted:
 
 ## Status
 
-Day 8 of 12. `snapshot`, `diff`, `watch`, `watch --judge`, `check`, the EMFILE
-projection, L1 attribution and L2 correlation are working, and the verdict is
-reachable as a library (`CheckPID`, `LeakCheck`). L3 (test-time goroutine
-pairing) is not built yet. See the roadmap for the exact boundary — this file
-does not claim features that do not exist.
+Day 9 of 12. `snapshot`, `diff`, `watch`, `watch --judge`, `check`, the EMFILE
+projection, L1 attribution, L2 correlation and L3 stack pairing are working, and
+the verdict is reachable as a library (`CheckPID`, `LeakCheck`). L3 is
+library-only by design — see above. Real-world corpus regression is next. See the
+roadmap for the exact boundary — this file does not claim features that do not
+exist.

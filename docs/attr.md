@@ -121,23 +121,28 @@
 | 用子串匹配 `log` | `strings.Contains(path, "log")` 会把 `/var/lib/catalog/index` 判成日志。规则用 `.log` 后缀或 `log`/`logs` **整段目录名**，理由与反例都写在 `looksLikeLog` 的注释里 |
 | 任何「可能是 X 打开的」措辞 | 那是 L2/L3 的地盘，而且必须带强度标注。`TestReasonsContainNoGuesswork` 用禁词表守着这一条 —— 行为测试抓不到措辞，所以措辞也要有测试 |
 
-## L1 与 L2 的强度差别
+## L1 / L2 / L3 的强度阶梯
 
-| | L1（本文件） | L2（`internal/correlate`） |
-|---|---|---|
-| 输入 | 指纹本身（scheme / kind / path / deleted） | 同一窗口内的进程级读数（threads / syscr / syscw / rss） |
-| 说的话 | 「这类资源是什么」 | 「增长开始时，这个计数器也在动」 |
-| 强度 | `high`，恒定为可证明的复述 | `low` / `medium` / `high`，只描述窗口里有多少个样本读到了值 |
-| 能否说「谁」 | 不能，也不暗示 | **更不能**。note 里明写「不是关于谁打开的结论」 |
-| 反向条件 | 该不报的不报（未泄漏的 series 不带归因） | 计数器没动、读不到、样本不足，都不产出 |
-| 相关测试 | `TestReasonsContainNoGuesswork` | `TestNotesCarryNoCausalLanguage`（禁词表加了 `caused` / `because` / `due to`） |
+| | L1（本文件） | L2（`internal/correlate`） | L3（`internal/stackpair`） |
+|---|---|---|---|
+| 输入 | 指纹本身（scheme / kind / path / deleted） | 同一窗口内的进程级读数（threads / syscr / syscw / rss） | 两次 `runtime.Stack` 的差集（被测代码前后各一张） |
+| 说的话 | 「这类资源是什么」 | 「增长开始时，这个计数器也在动」 | 「这些 goroutine 之前不在，现在在了」 |
+| 强度 | `high`，恒定为可证明的复述 | `low` / `medium` / `high`，只描述窗口里有多少个样本读到了值 | 采样，**恒为最弱**；且必须披露比较方法（id / 栈文本） |
+| 能否说「谁」 | 不能，也不暗示 | **更不能**。note 里明写「不是关于谁打开的结论」 | 不能。照片里没有「谁打开」这个字段，栈是采样时刻的位置 |
+| 反向条件 | 该不报的不报（未泄漏的 series 不带归因） | 计数器没动、读不到、样本不足，都不产出 | 干净代码一个字不打；runtime 自身的 goroutine 记数但不列；dump 截断报错而不是短捕获 |
+| 相关测试 | `TestReasonsContainNoGuesswork` | `TestNotesCarryNoCausalLanguage`（禁词表加了 `caused` / `because` / `due to`） | `TestMessagesAreLabelledAndDoNotClaimACause`（禁词表再加 `blame`） |
+| 在哪里有 | CLI + 库 | CLI + 库 | **只在库里**（`WithStacks()`） |
 
-一句话的分界线：**L1 复述证据，L2 报时间上的巧合**。两者都绝不能滑到
-「所以是它干的」—— 那是三层里唯一永远不会有的结论，因为 `/proc` 不提供。
+一句话的分界线：**L1 复述证据，L2 报时间上的巧合，L3 报两次采样之间的生灭**。
+三者都绝不能滑到「所以是它干的」—— 那是三层里唯一永远不会有的结论，
+因为 `/proc` 和 `runtime.Stack` 都不提供。
 
 ## 与 L3 的边界
 
-- L3（Day 9，未实现）：测试期 `runtime.Stack` 与 fd 变化的**采样配对**，
-  采样不到就说采样不到。
-
-三层的字段与标签是同一套，读者不需要知道实现细节就能判断一句话有多硬。
+- L3（Day 9，已实现）是测试期 `runtime.Stack` 与 fd 变化的**采样配对**，
+  作用域仅限 `pkg/fdscope.LeakCheck` + `WithStacks()`：栈只能从进程内部看到，
+  命令行的 `check <pid>` 没有这一层（补它只能靠 ptrace，本项目不做）。
+- L3 唯一比 L1/L2 多出来的东西是**函数名**，代价是它比这两层都更容易错：
+  看不见 `fn` 之前就存在的 goroutine，也看不见两次采样之间的生灭。
+  所以它默认关闭，且报告里每句话都带 `L3 sampling` 前缀。
+- 三层的字段与标签是同一套，读者不需要知道实现细节就能判断一句话有多硬。
