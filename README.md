@@ -479,13 +479,18 @@ trusted:
 | [docs/design.md](docs/design.md) | you want the reasoning behind fingerprints and the limits of `/proc` |
 | [docs/proc.md](docs/proc.md) | you need to know exactly which `/proc` fields are used and what they mean |
 | [docs/attr.md](docs/attr.md) | you want the attribution rule table, the specificity ladder, or the two rules deliberately not implemented |
+| [docs/corpus.md](docs/corpus.md) | you want to know how the verdicts were checked against real descriptor defects, and what they still cannot say |
 | [docs/roadmap.md](docs/roadmap.md) | you want to know what is deliberately not built yet |
 
 ## Status
 
-Day 9 of 12. `snapshot`, `diff`, `watch`, `watch --judge`, `check`, the EMFILE
+Day 10 of 12. `snapshot`, `diff`, `watch`, `watch --judge`, `check`, the EMFILE
 projection, L1 attribution, L2 correlation and L3 stack pairing are working, and
 the verdict is reachable as a library (`CheckPID`, `LeakCheck`). L3 is
-library-only by design — see above. Real-world corpus regression is next. See the
+library-only by design — see above. The verdict has now been run against three
+real descriptor lifecycle defects rewritten from a production project, including
+one that kills the process mid-window: that case must fail the check, and does.
+See [docs/corpus.md](docs/corpus.md) for the results and the boundaries they
+exposed. See the
 roadmap for the exact boundary — this file does not claim features that do not
 exist.

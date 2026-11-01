@@ -18,6 +18,7 @@
 | L1 归因 | `internal/attr` | 指纹 → 类别规则（数据驱动 + `--attr-rules`）；泄漏按类别分摊增长 |
 | L2 相关性 | `internal/correlate` | 泄漏起点 ↔ 进程级计数器（threads / syscr / syscw / rss）；只报相关，置信度只描述重叠样本数 |
 | 跨平台可编译 + 非 Linux 明确拒绝 | `internal/probe/supported_*.go` | 不假装支持 |
+| 真实语料回归 | `testdata/corpus` + `internal/corpus` | 三个外部项目的 fd 缺陷按模式复写（`-fixed` 成对），含「进程中途死亡必须报错」；见 [corpus.md](corpus.md) |
 | CI（test/lint/零依赖闸门/交叉编译） | `.github/workflows/ci.yml` | golangci-lint v2.12.2 |
 
 ## 进行中（两周计划）
@@ -32,7 +33,7 @@
 | Day 7 | L1 归因：指纹 → 类型/路径规则（`internal/attr` + `--attr-rules`） | done |
 | Day 8 | L2 归因：泄漏起始时刻 ↔ 进程内事件（标注相关性） | done |
 | Day 9 | L3 归因：`LeakCheck` + `WithStacks()` 的 goroutine 配对（仅库内，命令行没有） | done |
-| Day 10 | 真实语料回归（含外部项目里的真 bug 复现） | todo |
+| Day 10 | 真实语料回归（含外部项目里的真 bug 复现） | done |
 | Day 11 | 文档、基准、Release 工作流 | todo |
 | Day 12 | 收尾与 v1.0.0 | todo |
 
