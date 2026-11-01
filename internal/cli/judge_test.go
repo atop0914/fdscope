@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,6 +10,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/atop0914/fdscope/internal/analyze"
+	"github.com/atop0914/fdscope/internal/attr"
 )
 
 // These tests assert on the two things the verdict adds to `watch`: what it says,
@@ -401,5 +405,63 @@ while :; do sleep 0.05; done
 	}
 	if !strings.Contains(fmt.Sprint(err), "exit") && !strings.Contains(out, "requires --json") {
 		t.Logf("output: %s (err %v)", out, err)
+	}
+}
+
+// TestBreakdownIsPrintedForTheShapeItExistsFor pins a case the corpus found and the
+// renderer was dropping.
+//
+// The breakdown exists for a leak spread over many resources - a hundred paths
+// gaining one descriptor each - where no single row is convictable on its own and
+// the category is the only answer the reader can act on. That is precisely the
+// shape the old code skipped: it printed "no single resource was judged a leak on
+// its own" and stopped, so the one case the block was written for was the one case
+// it never appeared in.
+func TestBreakdownIsPrintedForTheShapeItExistsFor(t *testing.T) {
+	rep := analyze.LeakReport{
+		Samples: 20,
+		Leaking: true,
+		Total: analyze.LeakVerdict{
+			Fingerprint: "(total)",
+			Leak:        true,
+			Confidence:  analyze.ConfidenceMedium,
+			Reason:      "grew 90 descriptors and did not fall back",
+		},
+		Attribution: []attr.CategoryAttribution{{
+			Category:     "temporary file",
+			Rule:         "temp-file",
+			Why:          "the path is under /tmp",
+			Matched:      true,
+			Confidence:   attr.ConfidenceHigh,
+			Growth:       90,
+			Fingerprints: 90,
+			Coverage:     1,
+		}},
+	}
+
+	var buf bytes.Buffer
+	if err := renderJudgeTable(&buf, rep); err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "no single resource was judged a leak on its own") {
+		t.Errorf("the renderer must still say the per-resource rows are flat:\n%s", out)
+	}
+	if !strings.Contains(out, "attribution: share of the leak by resource class") {
+		t.Fatalf("no breakdown for a leak that has no per-resource verdict:\n%s", out)
+	}
+	if !strings.Contains(out, "temporary file") || !strings.Contains(out, "100%") {
+		t.Errorf("the breakdown does not name the category and its share:\n%s", out)
+	}
+
+	// Reverse: with nothing to attribute, no header. An empty section on every
+	// clean report is how a section stops being read.
+	rep.Attribution = nil
+	buf.Reset()
+	if err := renderJudgeTable(&buf, rep); err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	if strings.Contains(buf.String(), "attribution:") {
+		t.Errorf("printed a breakdown with no rows:\n%s", buf.String())
 	}
 }

@@ -99,9 +99,18 @@ func renderJudgeTable(w io.Writer, rep analyze.LeakReport) error {
 				return err
 			}
 		}
-		if err := renderBreakdown(w, rep.Attribution); err != nil {
-			return err
-		}
+	}
+	// The breakdown is printed whether or not any single resource was convicted.
+	//
+	// It used to live inside the else branch above, which silently dropped it for
+	// the one shape it exists for: a process whose descriptors are spread over so
+	// many paths that every per-resource row is a pulse of one, so nothing is
+	// individually convictable while the total climbs. Found by judging a real
+	// descriptor defect (a release that can never happen) - the verdict was right
+	// and the report withheld the answer, printing "no single resource was judged
+	// a leak on its own" and stopping there.
+	if err := renderBreakdown(w, rep.Attribution); err != nil {
+		return err
 	}
 	return renderCorrelation(w, rep)
 }
