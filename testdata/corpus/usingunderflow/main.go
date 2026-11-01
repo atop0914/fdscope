@@ -1,12 +1,13 @@
 // Command usingunderflow is a stand-in for a descriptor cache whose reference
 // count wraps around.
 //
-// It reproduces the PATTERN, not the upstream code: nothing here is copied from
-// that repository, which is not imported (fdscope has no dependencies). The
-// defect is the one in nutsdb's FdManager.ReduceUsing (fd_manager.go): "using" is
-// an unsigned counter and the decrement is unguarded, so a second release of the
-// same path takes it from 0 to 18446744073709551615 instead of failing. The entry
-// is then permanently "in use" and its descriptor is never reclaimed - the leak
+// It reproduces the PATTERN of a defect found in nutsdb's
+// internal/fileio/fd_manager.go; nothing here is copied from that repository,
+// which is not imported (fdscope has no dependencies). The defect is
+// FdManager.ReduceUsing: "using" is a uint field on the cache entry and the
+// decrement is unguarded, so a second release of the same path takes it from 0 to
+// 18446744073709551615 instead of failing. The entry is then permanently "in use",
+// cleanUselessFd skips it forever, and its descriptor is never reclaimed - the leak
 // is not one big open, it is a close that can no longer happen.
 //
 // Run with -fixed for the version that refuses to release what nobody holds.

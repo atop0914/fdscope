@@ -248,24 +248,24 @@ func assertLeakAndCategory(t *testing.T, fx *fixture) fdscope.CheckResult {
 	return res
 }
 
-// TestFdListDriftIsJudgedALeak covers the first defect: a list size that never
-// decreases, so evictions free slots that were already free and the descriptors
-// they should have closed stay open.
+// TestFdListDriftIsJudgedALeak covers the first defect: a list count that never
+// decreases, so the cache permanently believes it is full and hands out
+// descriptors it does not own.
 func TestFdListDriftIsJudgedALeak(t *testing.T) {
 	fx := startFixture(t, "fdlistdrift")
 	res := assertLeakAndCategory(t, fx)
 
-	// The per-resource rows are the part that makes the report actionable: four
-	// shard files, each held several times over. Counted here from the verdict, so
-	// a regression that collapsed them into one row or dropped them is visible.
-	growing := 0
-	for _, v := range res.Report.Series {
-		if v.Leak && strings.Contains(v.Fingerprint, "shard-") {
-			growing++
-		}
+	// This defect leaks over one data file per round, so the growth is spread over
+	// hundreds of fingerprints that each gain a single descriptor. Asserting the
+	// spread is asserting what makes the category the only actionable answer - and
+	// it pins that the breakdown is a real aggregation, not one row copied from the
+	// total.
+	if top := res.Report.Attribution[0]; top.Fingerprints < 20 {
+		t.Errorf("the leaked growth came from %d resource(s), want many: this defect opens a new data file each round",
+			top.Fingerprints)
 	}
-	if growing < 2 {
-		t.Errorf("%d shard series were judged leaks, want at least 2: %+v", growing, res.Report.Series)
+	if top := res.Report.Attribution[0]; top.Growth < 20 {
+		t.Errorf("the top category accounts for %d descriptors, want the bulk of the growth", top.Growth)
 	}
 }
 

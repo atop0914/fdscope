@@ -1,12 +1,13 @@
 // Command panicunknown is a stand-in for a descriptor cache that panics instead
 // of reporting a bad release.
 //
-// It reproduces the PATTERN, not the upstream code: nothing here is copied from
-// that repository, which is not imported (fdscope has no dependencies). The
-// defect is the one in nutsdb's FdManager.ReduceUsing (fd_manager.go): the
-// release path indexes the cache without checking that the path is in it, so a
-// release of something nobody holds dereferences a nil entry and the process
-// dies on the spot.
+// It reproduces the PATTERN of a defect found in nutsdb's
+// internal/fileio/fd_manager.go; nothing here is copied from that repository,
+// which is not imported (fdscope has no dependencies). The defect is
+// FdManager.ReduceUsing: the release path looks the path up in the cache and, when
+// it is absent, panics with "unexpected the node is not in cache" instead of
+// reporting it. Every release after a rotation that dropped the entry, or a second
+// release of the same path, takes the whole process down.
 //
 // This fixture exists for one assertion, and it is the most important one in the
 // corpus: a process that disappears mid-window must make a check FAIL, never
@@ -69,8 +70,14 @@ func (c *cache) reduceUsing(path string) error {
 		e.using--
 		return nil
 	}
-	// The defect: e is nil when path was never cached, and the decrement below
-	// dereferences it.
+	if e == nil {
+		// Upstream panics here on purpose, with this wording:
+		//   panic(fmt.Errorf("unexpected the node is not in cache %s", cleanPath))
+		// The pattern being reproduced is the decision to panic, not the sentence:
+		// a release of something nobody holds kills the process instead of being
+		// reported.
+		panic(fmt.Errorf("unexpected the node is not in cache %s", path))
+	}
 	e.using--
 	return nil
 }
