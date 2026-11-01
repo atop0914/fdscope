@@ -306,9 +306,13 @@ func TestProcessDyingMidWindowIsNotAVerdict(t *testing.T) {
 	// Prove the process was alive and growing before anything is asserted about
 	// the failure. Without this, "the check failed" would also be satisfied by a
 	// fixture that never started.
-	before := fx.held(t)
+	//
+	// The count is the process total, not the fixture's own files: the total is
+	// what the check judges, so it is the quantity whose growth makes the failure
+	// interesting.
+	before := fx.total(t)
 	time.Sleep(350 * time.Millisecond)
-	if mid := fx.held(t); mid <= before {
+	if mid := fx.total(t); mid <= before {
 		t.Fatalf("%s: held %d descriptors after 350ms, was %d: this fixture is supposed to grow before it dies",
 			fx.name, mid, before)
 	}
