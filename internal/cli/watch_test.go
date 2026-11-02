@@ -118,6 +118,18 @@ func stagedChild(t *testing.T, script string) (*child, string) {
 	return ch, ch.dir
 }
 
+// stagedChildWith is stagedChild with an explicit marker.
+//
+// A test whose premise is reached later than "ready" states it as a line on
+// stdout rather than as a file it polls for. The distinction is not cosmetic: a
+// file the script creates is observable while empty, and a marker either arrived
+// or did not.
+func stagedChildWith(t *testing.T, script, marker string) (*child, string) {
+	t.Helper()
+	ch := startChildWith(t, "bash", script, marker)
+	return ch, ch.dir
+}
+
 // TestWatchPersistentOpenIsRising is the positive case from the plan: a process
 // that keeps opening descriptors without closing them must show a rising series.
 // This is the shape a leak has, and it is the only shape the tool must never
@@ -395,27 +407,24 @@ while :; do sleep 0.05; done
 // itself: it verifies the path is really gone before reporting.
 func TestWatchTracksHeldDeletedFile(t *testing.T) {
 	bin := buildCLI(t)
-	ch, dir := stagedChild(t, `
-echo ready
+	// The premise travels on stdout, not through a file the parent polls.
+	//
+	// The first version wrote it to "$d/premise" and waited up to ten seconds for
+	// the file to appear. That wait could end early with an empty read: the shell
+	// sets the redirect up before it runs the `if`, so the file exists for a
+	// moment with nothing in it, and a parent that reads it in that moment
+	// concludes the child never got there. Under the full race suite it did once.
+	// A marker line cannot have that race - it arrived or it did not - and a child
+	// that finds the path still there now exits, so the failure carries the
+	// child's own account instead of a ten-second silence.
+	ch, _ := stagedChildWith(t, `
 printf 'payload' > "$d/ghost.dat"
 exec {fd}<>"$d/ghost.dat"
 rm -f "$d/ghost.dat"
-if [ -e "$d/ghost.dat" ]; then echo "path-still-there"; else echo "gone"; fi > "$d/premise"
+if [ -e "$d/ghost.dat" ]; then echo "path-still-there"; exit 1; fi
+echo gone
 while :; do sleep 0.05; done
-`)
-
-	deadline := time.Now().Add(10 * time.Second)
-	premise := ""
-	for time.Now().Before(deadline) {
-		if b, err := exec.Command("cat", filepath.Join(dir, "premise")).Output(); err == nil {
-			premise = strings.TrimSpace(string(b))
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	if premise != "gone" {
-		t.Fatalf("child did not unlink the file (premise = %q)", premise)
-	}
+`, "gone")
 
 	out, err := runWatchCLI(t, bin, ch.pid(), "--json", "--interval", "40ms", "--samples", "5")
 	if err != nil {
