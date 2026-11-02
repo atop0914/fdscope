@@ -31,7 +31,14 @@ jobs:
       # Prove no test silently skipped. A skipped leak test is indistinguishable
       # from a passing one in the summary line, and this project's value is
       # entirely in its assertions actually running.
-      - name: Verify no tests were skipped
+      #
+      # A skip is not the only way a suite can fail to run. A package excluded by
+      # a build tag, or one renamed out from under this list, contributes neither
+      # PASS nor SKIP: `go test ./...` still says "ok" for everything it did run,
+      # so the check above stays green while the tests that matter have quietly
+      # stopped existing. That is the failure this second loop closes - it names
+      # the suites whose absence would matter, and demands each report "ok".
+      - name: Verify no tests were skipped and the required suites ran
         run: |
           go test -count=1 -v ./... 2>&1 | tee /tmp/test.log
           if grep -q -- '--- SKIP' /tmp/test.log; then
@@ -39,6 +46,15 @@ jobs:
             grep -- '--- SKIP' /tmp/test.log
             exit 1
           fi
+          # internal/corpus drives real child processes through go build, so its
+          # absence would also be the one thing a fast green run could hide.
+          for pkg in internal/corpus internal/cli internal/probe internal/analyze internal/attr; do
+            if ! grep -qE "^ok[[:space:]]+github.com/atop0914/fdscope/$pkg([[:space:]]|$)" /tmp/test.log; then
+              echo "::error::$pkg reported no test result (build tag, rename, or removal)"
+              exit 1
+            fi
+          done
+          echo "required suites: all reported ok"
 
       # Zero third-party dependencies is a design promise, not an accident.
       # This gate fails if anyone adds one.
