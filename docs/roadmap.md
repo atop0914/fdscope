@@ -19,7 +19,9 @@
 | L2 相关性 | `internal/correlate` | 泄漏起点 ↔ 进程级计数器（threads / syscr / syscw / rss）；只报相关，置信度只描述重叠样本数 |
 | 跨平台可编译 + 非 Linux 明确拒绝 | `internal/probe/supported_*.go` | 不假装支持 |
 | 真实语料回归 | `testdata/corpus` + `internal/corpus` | 三个外部项目的 fd 缺陷按模式复写（`-fixed` 成对），含「进程中途死亡必须报错」；见 [corpus.md](corpus.md) |
-| CI（test/lint/零依赖闸门/交叉编译） | `.github/workflows/ci.yml` | golangci-lint v2.12.2 |
+| CI（test / SKIP / 必需套件真跑 / 零依赖 / 交叉编译 / lint） | `.github/workflows/ci.yml` | golangci-lint v2.12.2；`--- SKIP` 与「某个包被 build tag 排除」都会被拦下 |
+| 文档一致性闸门 | `internal/docs` | 相对链接可解析、仓库内路径（含通配）真实存在、每个 `docs/*.md` 都被 README 链到；检查器自身对损坏输入必须报错 |
+| 性能基准（只记录数字，不进 CI） | `internal/*/bench_test.go` + [benchmarks.md](benchmarks.md) | 归一化 / 裁决 / 快照三条热路径，基准内先断言前提 |
 
 ## 进行中（两周计划）
 
@@ -34,8 +36,25 @@
 | Day 8 | L2 归因：泄漏起始时刻 ↔ 进程内事件（标注相关性） | done |
 | Day 9 | L3 归因：`LeakCheck` + `WithStacks()` 的 goroutine 配对（仅库内，命令行没有） | done |
 | Day 10 | 真实语料回归（含外部项目里的真 bug 复现） | done |
-| Day 11 | 文档、基准、Release 工作流 | todo |
+| Day 11 | CI 真实复核 + 文档一致性闸门 + 性能基准 | done |
 | Day 12 | 收尾与 v1.0.0 | todo |
+
+## CI 到底拦什么
+
+CI 不是「跑一遍测试」，六条闸门各自拦一种失败：
+
+| 闸门 | 拦下的失败 |
+|------|------------|
+| `go test -race -timeout 600s ./...` | 逻辑与竞态 |
+| `--- SKIP` 计数为 0 | 非 Linux 平台的静默跳过。被跳过的泄漏测试和通过的测试在摘要行里长得一样 |
+| 必需套件必须报告 `ok` | 一个包被 build tag 排除或被改名后，既不 PASS 也不 SKIP——上一条闸门看不见它 |
+| 零第三方依赖 | `go list -deps` 里出现标准库以外的包 |
+| 交叉编译 + darwin vet | 平台相关代码只在 linux/amd64 编译过；测试文件里的平台断言同理 |
+| `golangci-lint v2.12.2` | 与本地同版本，避免「本地绿、CI 红」 |
+
+第六条之外还有一条不成文的：**慢不许靠放宽超时解决**。当前 `-race` 全量
+70 秒出头，`600s` 是余量而不是遮羞布；如果它开始顶到天花板，要查的是哪个包慢，
+不是把数字调大。
 
 ## 明确不做
 
