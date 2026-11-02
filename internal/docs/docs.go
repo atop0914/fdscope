@@ -216,7 +216,6 @@ func maskFences(s string) string {
 
 // target is one link destination, with the offset it was found at.
 type target struct {
-	text   string
 	target string
 	offset int
 }
