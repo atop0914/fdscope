@@ -7,7 +7,8 @@
 这一天换一个方向：拿**别人项目里真实存在**的 fd 生命周期缺陷，
 按模式重写成可以跑的程序，再问 fdscope 同一个问题。
 
-三条缺陷全部来自 **nutsdb** 的 `internal/fileio/fd_manager.go`，
+三条缺陷全部来自 **nutsdb** 的
+[internal/fileio/fd_manager.go](https://github.com/nutsdb/nutsdb/blob/master/internal/fileio/fd_manager.go)，
 是调研阶段挖到并在容器里实测复现过的。**没有一行代码是拷贝来的**：
 该仓库没有被 import，也不可能被 import（`go.mod` 只有标准库，CI 有闸门）。
 
