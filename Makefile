@@ -9,7 +9,7 @@ BIN     := bin/fdscope
 # -trimpath belongs to `go build`, NOT to LDFLAGS: putting it in LDFLAGS makes
 # the linker fail with "flag provided but not defined: -trimpath".
 LDFLAGS := -s -w \
-	-X $(MODULE)/internal/cli.Version=$(VERSION) \
+	-X $(MODULE)/internal/version.Version=$(VERSION) \
 	-X $(MODULE)/internal/version.GitCommit=$(COMMIT) \
 	-X $(MODULE)/internal/version.BuildDate=$(DATE)
 

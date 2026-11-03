@@ -8,15 +8,37 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/atop0914/fdscope/internal/version"
 )
 
-func TestVersion(t *testing.T) {
-	var out bytes.Buffer
-	if err := Run([]string{"version"}, &out, &out); err != nil {
+func TestVersionReportsTheInjectedBuildIdentity(t *testing.T) {
+	// The previous assertion here only checked the "fdscope " prefix, which a
+	// hard-coded string satisfies exactly as well as real build metadata - it
+	// could not fail for the reason it existed. Setting the three variables and
+	// demanding them back proves the subcommand reads them, and pins the reason
+	// the Makefile now injects into one package instead of two.
+	oldVer, oldCommit, oldDate := version.Version, version.GitCommit, version.BuildDate
+	t.Cleanup(func() {
+		version.Version, version.GitCommit, version.BuildDate = oldVer, oldCommit, oldDate
+	})
+	version.Version = "v9.9.9-test"
+	version.GitCommit = "abc1234"
+	version.BuildDate = "2026-11-03T00:00:00Z"
+
+	var out, errOut bytes.Buffer
+	if err := Run([]string{"version"}, &out, &errOut); err != nil {
 		t.Fatalf("version: %v", err)
 	}
-	if !strings.HasPrefix(out.String(), "fdscope ") {
-		t.Errorf("version output = %q", out.String())
+	const want = "fdscope v9.9.9-test (abc1234, 2026-11-03T00:00:00Z)\n"
+	if got := out.String(); got != want {
+		t.Fatalf("version output:\n got %q\nwant %q", got, want)
+	}
+	// Reverse assertion: nothing on stderr. Diagnostics belong there, but a
+	// working `version` has none, and a script capturing stdout must not find
+	// them mixed in either.
+	if errOut.Len() != 0 {
+		t.Errorf("version wrote %q to stderr, want nothing", errOut.String())
 	}
 }
 

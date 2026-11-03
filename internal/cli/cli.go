@@ -19,6 +19,7 @@ import (
 
 	"github.com/atop0914/fdscope/internal/model"
 	"github.com/atop0914/fdscope/internal/probe"
+	"github.com/atop0914/fdscope/internal/version"
 )
 
 // errLeakFound signals that an audit judged a leak present. It is a sentinel so
@@ -90,7 +91,11 @@ func Run(args []string, stdout, stderr io.Writer) error {
 	case "check":
 		return runCheck(args[1:], stdout, stderr)
 	case "version":
-		_, err := fmt.Fprintln(stdout, "fdscope "+Version)
+		// The whole identity, not just the tag. A binary that claims "v1.0.0"
+		// cannot be told apart from a local build of some commit near it, and
+		// "which commit is this binary?" is the first question in any bug report
+		// about a released tool.
+		_, err := fmt.Fprintln(stdout, "fdscope "+version.String())
 		return err
 	case "-h", "--help", "help":
 		_, err := fmt.Fprint(stdout, usage)
@@ -114,9 +119,10 @@ func ExitCode(err error) int {
 	return 1
 }
 
-// Version is the reported build version. It is overridden at link time by the
-// Makefile and falls back to "dev" for `go run`.
-var Version = "dev"
+// Build identity lives in exactly one place: the version package. This package
+// used to carry its own Version variable, which meant the Makefile injected the
+// tag here while the commit and build date went somewhere nothing read - so
+// `fdscope version` could not answer "which commit is this?". One fact, one home.
 
 func runSnapshot(args []string, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("snapshot", flag.ContinueOnError)
