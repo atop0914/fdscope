@@ -23,7 +23,7 @@
 | 文档一致性闸门 | `internal/docs` | 相对链接可解析、仓库内路径（含通配）真实存在、每个 `docs/*.md` 都被 README 链到；检查器自身对损坏输入必须报错 |
 | 性能基准（只记录数字，不进 CI） | `internal/*/bench_test.go` + [benchmarks.md](benchmarks.md) | 归一化 / 裁决 / 快照三条热路径，基准内先断言前提 |
 
-## 进行中（两周计划）
+## 两周计划（已全部完成）
 
 | 阶段 | 能力 | 状态 |
 |------|------|------|
@@ -37,7 +37,7 @@
 | Day 9 | L3 归因：`LeakCheck` + `WithStacks()` 的 goroutine 配对（仅库内，命令行没有） | done |
 | Day 10 | 真实语料回归（含外部项目里的真 bug 复现） | done |
 | Day 11 | CI 真实复核 + 文档一致性闸门 + 性能基准 | done |
-| Day 12 | 收尾与 v1.0.0 | todo |
+| Day 12 | 收尾与发布：v1.0.0（`2078c81`）→ 补丁 v1.0.1（`fe27295`，修 `go install` 的版本身份） | done |
 
 ## CI 到底拦什么
 
