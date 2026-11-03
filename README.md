@@ -76,10 +76,11 @@ is still held" is an action item.
 ## Install
 
 ```console
-go install github.com/atop0914/fdscope/cmd/fdscope@latest
+go install github.com/atop0914/fdscope/cmd/fdscope@v1.0.0
 ```
 
-Or build from source:
+Use `@latest` instead of the tag to track the newest release. Or build from
+source:
 
 ```console
 git clone https://github.com/atop0914/fdscope
@@ -485,20 +486,22 @@ trusted:
 
 ## Status
 
-Day 11 of 12. `snapshot`, `diff`, `watch`, `watch --judge`, `check`, the EMFILE
-projection, L1 attribution, L2 correlation and L3 stack pairing are working, and
-the verdict is reachable as a library (`CheckPID`, `LeakCheck`). L3 is
-library-only by design — see above.
+v1.0.0, released 2026-11-03. `snapshot`, `diff`, `watch`, `watch --judge`,
+`check`, the EMFILE projection, L1 attribution, L2 correlation and L3 stack
+pairing are working, and the verdict is reachable as a library (`CheckPID`,
+`LeakCheck`). L3 is library-only by design — see above.
 
 The verdict has been run against three real descriptor lifecycle defects rewritten
 from a production project, including one that kills the process mid-window: that
 case must fail the check, and does (see [docs/corpus.md](docs/corpus.md)). The
-documentation is now checked the way the code is: every relative link, every
+documentation is checked the way the code is: every relative link, every
 repository path written in a code span, and every page's entry point from this
 file is resolved by a test, and the checker is itself tested against a dead link
 (see `internal/docs`). Measured costs are recorded in
 [docs/benchmarks.md](docs/benchmarks.md) — numbers, not gates.
 
-What remains is the release: full regression, the cross-compilation gate and
-v1.0.0. For the exact boundary of what exists, see the
-roadmap — this file does not claim features that do not exist.
+[CHANGELOG.md](CHANGELOG.md) lists what this release contains, how it was
+verified, and the three boundaries that come with it: Linux only, `/proc` does
+not record who opened a descriptor, and sampling cannot see what happens between
+two samples. For the exact boundary of what exists, see the roadmap — this file
+does not claim features that do not exist.
