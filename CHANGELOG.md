@@ -6,6 +6,20 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [v1.0.1] - 2026-11-03
+
+### Fixed
+
+- A binary installed with `go install ...@v1.0.0` printed
+  `fdscope dev (unknown, unknown)`. `go install` does not run this project's
+  Makefile, so all three linker-injected values were absent — and the module
+  version the toolchain records in the build info was never read. Build identity
+  now falls back to it, and a field the build did not supply is left out instead
+  of being printed as `unknown`, so the same command reports `v1.0.1`.
+
+  Found by installing the release the way the README says to, which is the only
+  way that question gets asked.
+
 ## [v1.0.0] - 2026-11-03
 
 First release. Linux only, standard library only, no privileges.

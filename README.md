@@ -76,7 +76,7 @@ is still held" is an action item.
 ## Install
 
 ```console
-go install github.com/atop0914/fdscope/cmd/fdscope@v1.0.0
+go install github.com/atop0914/fdscope/cmd/fdscope@v1.0.1
 ```
 
 Use `@latest` instead of the tag to track the newest release. Or build from
